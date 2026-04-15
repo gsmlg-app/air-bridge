@@ -16,6 +16,7 @@ final class AppState: ObservableObject {
                 }
             }
         }
+        startServer()
     }
 
     func play(path: String) async throws {
