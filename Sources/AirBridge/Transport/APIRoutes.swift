@@ -1,8 +1,38 @@
 import Foundation
 import Hummingbird
 
-func buildRouter(engine: PlaybackEngine, appState: AppState?) -> Router<BasicRequestContext> {
+// MARK: - Auth Middleware
+
+struct AuthMiddleware: RouterMiddleware {
+    let token: String
+
+    func handle(
+        _ request: Request,
+        context: BasicRequestContext,
+        next: (Request, BasicRequestContext) async throws -> Response
+    ) async throws -> Response {
+        guard let auth = request.headers[.authorization],
+              auth == "Bearer \(token)" else {
+            Log.http.warning("Unauthorized request to \(request.uri.path)")
+            return try jsonResponse(
+                ErrorResponse(error: "unauthorized", message: "Invalid or missing auth token"),
+                status: .unauthorized
+            )
+        }
+        return try await next(request, context)
+    }
+}
+
+// MARK: - Router
+
+func buildRouter(engine: PlaybackEngine, appState: AppState?, authToken: String = "") -> Router<BasicRequestContext> {
     let router = Router(context: BasicRequestContext.self)
+
+    if !authToken.isEmpty {
+        router.addMiddleware {
+            AuthMiddleware(token: authToken)
+        }
+    }
 
     // GET /status
     router.get("/status") { request, context -> Response in
@@ -47,6 +77,8 @@ func buildRouter(engine: PlaybackEngine, appState: AppState?) -> Router<BasicReq
     return router
 }
 
+// MARK: - Helpers
+
 private func jsonResponse<T: Encodable>(_ value: T, status: HTTPResponse.Status = .ok) throws -> Response {
     let data = try JSONEncoder().encode(value)
     var headers = HTTPFields()
@@ -58,8 +90,8 @@ private func jsonResponse<T: Encodable>(_ value: T, status: HTTPResponse.Status 
     )
 }
 
-func buildTestApplication(engine: PlaybackEngine) throws -> some ApplicationProtocol {
-    let router = buildRouter(engine: engine, appState: nil)
+func buildTestApplication(engine: PlaybackEngine, authToken: String = "") throws -> some ApplicationProtocol {
+    let router = buildRouter(engine: engine, appState: nil, authToken: authToken)
     return Application(
         router: router,
         configuration: .init(address: .hostname("127.0.0.1", port: 0))

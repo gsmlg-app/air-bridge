@@ -4,11 +4,20 @@ import SwiftUI
 final class AppState: ObservableObject {
     @Published var playbackState: PlaybackState = .idle
     @Published var currentRoute: String = "System Default"
-    @Published var serverPort: Int = 9876
+
+    let listenAddress: String
+    let serverPort: Int
+    let authToken: String
 
     let engine = PlaybackEngine()
 
     init() {
+        let defaults = UserDefaults.standard
+        self.listenAddress = defaults.string(forKey: "listenAddress") ?? "127.0.0.1"
+        let portString = defaults.string(forKey: "serverPort") ?? "9876"
+        self.serverPort = Int(portString) ?? 9876
+        self.authToken = defaults.string(forKey: "authToken") ?? ""
+
         Task {
             await engine.setStateCallback { [weak self] newState in
                 Task { @MainActor in
@@ -30,13 +39,15 @@ final class AppState: ObservableObject {
 
 extension AppState {
     func startServer() {
+        let address = self.listenAddress
+        let port = self.serverPort
+        let token = self.authToken
         Task.detached { [weak self] in
             guard let self else { return }
-            let port = await self.serverPort
             let engine = self.engine
             do {
-                let app = try buildApplication(engine: engine, appState: self, port: port)
-                Log.server.info("Starting server on 127.0.0.1:\(port)")
+                let app = try buildApplication(engine: engine, appState: self, address: address, port: port, authToken: token)
+                Log.server.info("Starting server on \(address):\(port)")
                 try await app.runService()
             } catch {
                 Log.server.error("Server failed to start: \(error)")

@@ -1,11 +1,11 @@
 import Hummingbird
 
-func buildApplication(engine: PlaybackEngine, appState: AppState?, port: Int) throws -> some ApplicationProtocol {
-    let router = buildRouter(engine: engine, appState: appState)
+func buildApplication(engine: PlaybackEngine, appState: AppState?, address: String, port: Int, authToken: String) throws -> some ApplicationProtocol {
+    let router = buildRouter(engine: engine, appState: appState, authToken: authToken)
     let app = Application(
         router: router,
-        configuration: .init(address: .hostname("127.0.0.1", port: port))
+        configuration: .init(address: .hostname(address, port: port))
     )
-    Log.server.info("Server configured on 127.0.0.1:\(port)")
+    Log.server.info("Server configured on \(address):\(port)")
     return app
 }

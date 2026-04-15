@@ -29,7 +29,7 @@ struct MenuBarView: View {
             Divider()
             Label("Route: \(appState.currentRoute)", systemImage: "airplayaudio")
                 .font(.caption)
-            Label("Listening on 127.0.0.1:\(appState.serverPort)", systemImage: "network")
+            Label("Listening on \(appState.listenAddress):\(appState.serverPort)", systemImage: "network")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Divider()

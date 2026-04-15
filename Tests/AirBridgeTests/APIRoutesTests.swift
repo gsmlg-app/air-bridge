@@ -4,6 +4,8 @@ import HummingbirdTesting
 import Foundation
 @testable import AirBridge
 
+// MARK: - Basic Route Tests
+
 @Test func statusEndpoint_returnsIdleByDefault() async throws {
     let engine = PlaybackEngine()
     let app = try buildTestApplication(engine: engine)
@@ -43,5 +45,54 @@ import Foundation
         let data = Data(buffer: response.body)
         let body = try JSONDecoder().decode(StopResponse.self, from: data)
         #expect(body.status == "idle")
+    }
+}
+
+// MARK: - Auth Middleware Tests
+
+@Test func authEnabled_validToken_returns200() async throws {
+    let engine = PlaybackEngine()
+    let app = try buildTestApplication(engine: engine, authToken: "test-secret")
+    try await app.test(.router) { client in
+        let response = try await client.execute(
+            uri: "/status",
+            method: .get,
+            headers: [.authorization: "Bearer test-secret"]
+        )
+        #expect(response.status == .ok)
+    }
+}
+
+@Test func authEnabled_missingToken_returns401() async throws {
+    let engine = PlaybackEngine()
+    let app = try buildTestApplication(engine: engine, authToken: "test-secret")
+    try await app.test(.router) { client in
+        let response = try await client.execute(uri: "/status", method: .get)
+        #expect(response.status == .unauthorized)
+        let data = Data(buffer: response.body)
+        let body = try JSONDecoder().decode(ErrorResponse.self, from: data)
+        #expect(body.error == "unauthorized")
+    }
+}
+
+@Test func authEnabled_wrongToken_returns401() async throws {
+    let engine = PlaybackEngine()
+    let app = try buildTestApplication(engine: engine, authToken: "test-secret")
+    try await app.test(.router) { client in
+        let response = try await client.execute(
+            uri: "/status",
+            method: .get,
+            headers: [.authorization: "Bearer wrong-token"]
+        )
+        #expect(response.status == .unauthorized)
+    }
+}
+
+@Test func authDisabled_noToken_returns200() async throws {
+    let engine = PlaybackEngine()
+    let app = try buildTestApplication(engine: engine, authToken: "")
+    try await app.test(.router) { client in
+        let response = try await client.execute(uri: "/status", method: .get)
+        #expect(response.status == .ok)
     }
 }
