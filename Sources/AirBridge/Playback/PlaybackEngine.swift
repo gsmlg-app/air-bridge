@@ -1,22 +1,14 @@
 import AVFoundation
-import AudioToolbox
-import CoreAudio
 import Foundation
 
 actor PlaybackEngine {
     private(set) var state: PlaybackState = .idle
     private var audioEngine: AVAudioEngine?
     private var playerNode: AVAudioPlayerNode?
-    private var outputDeviceID: AudioDeviceID = 0
     private var stateCallback: (@Sendable (PlaybackState) -> Void)?
 
     func setStateCallback(_ callback: @escaping @Sendable (PlaybackState) -> Void) {
         self.stateCallback = callback
-    }
-
-    func setOutputDevice(_ deviceID: AudioDeviceID) {
-        self.outputDeviceID = deviceID
-        Log.playback.info("Output device set to ID \(deviceID)")
     }
 
     func play(path: String) throws -> PlaybackState {
@@ -30,7 +22,9 @@ actor PlaybackEngine {
         // Stop any current playback
         stopInternal()
 
-        // Set up audio engine
+        // Set up audio engine — plays through whatever the current
+        // system default output is (including AirPlay/HomePod if selected
+        // via AVRoutePickerView or System Settings).
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         engine.attach(player)
@@ -48,27 +42,6 @@ actor PlaybackEngine {
 
         // Connect player to output
         engine.connect(player, to: engine.mainMixerNode, format: audioFile.processingFormat)
-
-        // Set output device if configured
-        if outputDeviceID != 0 {
-            let outputNode = engine.outputNode
-            if let audioUnit = outputNode.audioUnit {
-                var deviceID = outputDeviceID
-                let status = AudioUnitSetProperty(
-                    audioUnit,
-                    kAudioOutputUnitProperty_CurrentDevice,
-                    kAudioUnitScope_Global,
-                    0,
-                    &deviceID,
-                    UInt32(MemoryLayout<AudioDeviceID>.size)
-                )
-                if status == noErr {
-                    Log.playback.info("Routed audio to device ID \(self.outputDeviceID)")
-                } else {
-                    Log.playback.warning("Failed to set output device (status: \(status)), using default")
-                }
-            }
-        }
 
         // Start engine and schedule playback
         do {
@@ -127,7 +100,6 @@ actor PlaybackEngine {
     }
 
     private func handlePlaybackFinished() {
-        // Only transition to idle if still playing (not already stopped)
         if case .playing = state {
             Log.playback.info("Playback finished")
             transition(to: .idle)

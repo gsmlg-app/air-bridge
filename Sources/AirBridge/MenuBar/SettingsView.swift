@@ -24,12 +24,12 @@ struct SettingsView: View {
                 }
                 .onChange(of: selectedDeviceID) { _, newValue in
                     savedDeviceID = Int(newValue)
-                    // Update engine output device for next playback
-                    Task {
-                        await appState.engine.setOutputDevice(newValue)
-                    }
-                    // Update route display
+                    // Change the system default output device.
+                    // AVAudioEngine plays through the system default,
+                    // so this ensures audio goes to the selected device.
+                    // For AirPlay/HomePod: use the AirPlay button below instead.
                     if newValue != 0 {
+                        _ = AudioDeviceManager.setDefaultOutputDevice(newValue)
                         appState.currentRoute = outputDevices.first(where: { $0.id == newValue })?.name ?? "System Default"
                     } else {
                         let defaultID = AudioDeviceManager.getDefaultOutputDeviceID()
@@ -38,16 +38,17 @@ struct SettingsView: View {
                 }
 
                 HStack {
-                    Text("AirPlay Devices:")
-                        .font(.caption)
                     RoutePickerWrapper()
                         .frame(width: 24, height: 24)
-                    Text("Click to discover AirPlay targets")
+                    Text("Select HomePod / AirPlay target here")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+                Text("For HomePod: click the AirPlay button above, select your HomePod, then set Play Target to \"System Default\".")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
 
-                Button("Refresh Devices") {
+                Button("Refresh Device List") {
                     refreshDevices()
                 }
                 .font(.caption)
