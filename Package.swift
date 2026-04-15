@@ -17,7 +17,10 @@ let package = Package(
         ),
         .testTarget(
             name: "AirBridgeTests",
-            dependencies: ["AirBridge"],
+            dependencies: [
+                "AirBridge",
+                .product(name: "HummingbirdTesting", package: "hummingbird"),
+            ],
             path: "Tests/AirBridgeTests"
         ),
     ]

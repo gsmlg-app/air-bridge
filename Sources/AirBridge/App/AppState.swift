@@ -27,20 +27,19 @@ final class AppState: ObservableObject {
     }
 }
 
-// NOTE: startServer() is commented out until Task 7 provides buildApplication(engine:appState:port:).
-// extension AppState {
-//     func startServer() {
-//         Task.detached { [weak self] in
-//             guard let self else { return }
-//             let port = await self.serverPort
-//             let engine = await self.engine
-//             do {
-//                 let app = try buildApplication(engine: engine, appState: self, port: port)
-//                 Log.server.info("Starting server on 127.0.0.1:\(port)")
-//                 try await app.runService()
-//             } catch {
-//                 Log.server.error("Server failed to start: \(error)")
-//             }
-//         }
-//     }
-// }
+extension AppState {
+    func startServer() {
+        Task.detached { [weak self] in
+            guard let self else { return }
+            let port = await self.serverPort
+            let engine = await self.engine
+            do {
+                let app = try buildApplication(engine: engine, appState: self, port: port)
+                Log.server.info("Starting server on 127.0.0.1:\(port)")
+                try await app.runService()
+            } catch {
+                Log.server.error("Server failed to start: \(error)")
+            }
+        }
+    }
+}
