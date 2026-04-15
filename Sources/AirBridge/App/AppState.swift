@@ -33,7 +33,7 @@ extension AppState {
         Task.detached { [weak self] in
             guard let self else { return }
             let port = await self.serverPort
-            let engine = await self.engine
+            let engine = self.engine
             do {
                 let app = try buildApplication(engine: engine, appState: self, port: port)
                 Log.server.info("Starting server on 127.0.0.1:\(port)")
