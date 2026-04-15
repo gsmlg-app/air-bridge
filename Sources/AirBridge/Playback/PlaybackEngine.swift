@@ -3,8 +3,10 @@ import Foundation
 
 actor PlaybackEngine {
     private(set) var state: PlaybackState = .idle
-    private var audioEngine: AVAudioEngine?
-    private var playerNode: AVAudioPlayerNode?
+    private var player: AVPlayer?
+    private var playerItem: AVPlayerItem?
+    private var endObserver: NSObjectProtocol?
+    private var errorObserver: NSObjectProtocol?
     private var stateCallback: (@Sendable (PlaybackState) -> Void)?
 
     func setStateCallback(_ callback: @escaping @Sendable (PlaybackState) -> Void) {
@@ -19,48 +21,38 @@ actor PlaybackEngine {
             break
         }
 
-        // Stop any current playback
         stopInternal()
 
-        // Set up audio engine — plays through whatever the current
-        // system default output is (including AirPlay/HomePod if selected
-        // via AVRoutePickerView or System Settings).
-        let engine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
-        engine.attach(player)
-
-        // Load the audio file
         let url = URL(fileURLWithPath: path)
-        let audioFile: AVAudioFile
-        do {
-            audioFile = try AVAudioFile(forReading: url)
-        } catch {
-            Log.playback.error("Failed to read audio file: \(error)")
-            transition(to: .error(message: "Failed to read audio file: \(error.localizedDescription)"))
-            return state
+        let item = AVPlayerItem(url: url)
+        let avPlayer = AVPlayer(playerItem: item)
+
+        // Observe playback completion
+        let endObs = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { await self?.handlePlaybackFinished() }
         }
 
-        // Connect player to output
-        engine.connect(player, to: engine.mainMixerNode, format: audioFile.processingFormat)
-
-        // Start engine and schedule playback
-        do {
-            try engine.start()
-        } catch {
-            Log.playback.error("Failed to start audio engine: \(error)")
-            transition(to: .error(message: "Audio engine failed: \(error.localizedDescription)"))
-            return state
+        // Observe playback errors
+        let errorObs = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] notification in
+            let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            let msg = error?.localizedDescription ?? "Unknown playback error"
+            Task { await self?.handlePlaybackError(message: msg) }
         }
 
-        player.scheduleFile(audioFile, at: nil) { [weak self] in
-            Task {
-                await self?.handlePlaybackFinished()
-            }
-        }
-        player.play()
+        avPlayer.play()
 
-        self.audioEngine = engine
-        self.playerNode = player
+        self.player = avPlayer
+        self.playerItem = item
+        self.endObserver = endObs
+        self.errorObserver = errorObs
 
         Log.playback.info("Playing: \(path)")
         transition(to: .playing(file: path))
@@ -76,7 +68,7 @@ actor PlaybackEngine {
 
     func pause() -> PlaybackState {
         guard case .playing(let file) = state else { return state }
-        playerNode?.pause()
+        player?.pause()
         Log.playback.info("Paused: \(file)")
         transition(to: .paused(file: file))
         return state
@@ -84,7 +76,7 @@ actor PlaybackEngine {
 
     func resume() -> PlaybackState {
         guard case .paused(let file) = state else { return state }
-        playerNode?.play()
+        player?.play()
         Log.playback.info("Resumed: \(file)")
         transition(to: .playing(file: file))
         return state
@@ -93,17 +85,31 @@ actor PlaybackEngine {
     // MARK: - Internal
 
     private func stopInternal() {
-        playerNode?.stop()
-        audioEngine?.stop()
-        playerNode = nil
-        audioEngine = nil
+        player?.pause()
+        if let obs = endObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        if let obs = errorObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        player = nil
+        playerItem = nil
+        endObserver = nil
+        errorObserver = nil
     }
 
     private func handlePlaybackFinished() {
         if case .playing = state {
             Log.playback.info("Playback finished")
+            stopInternal()
             transition(to: .idle)
         }
+    }
+
+    private func handlePlaybackError(message: String) {
+        Log.playback.error("Playback error: \(message)")
+        stopInternal()
+        transition(to: .error(message: message))
     }
 
     private func transition(to newState: PlaybackState) {
