@@ -27,8 +27,13 @@ struct MenuBarView: View {
             }
 
             Divider()
-            Label("Route: \(appState.currentRoute)", systemImage: "airplayaudio")
-                .font(.caption)
+            HStack {
+                Label("Route: \(appState.currentRoute)", systemImage: "airplayaudio")
+                    .font(.caption)
+                Spacer()
+                RoutePickerWrapper()
+                    .frame(width: 20, height: 20)
+            }
             Label("Listening on \(appState.listenAddress):\(appState.serverPort)", systemImage: "network")
                 .font(.caption)
                 .foregroundColor(.secondary)

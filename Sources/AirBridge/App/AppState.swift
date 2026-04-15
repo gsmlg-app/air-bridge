@@ -1,3 +1,4 @@
+import CoreAudio
 import SwiftUI
 
 @MainActor
@@ -17,6 +18,18 @@ final class AppState: ObservableObject {
         let portString = defaults.string(forKey: "serverPort") ?? "9876"
         self.serverPort = Int(portString) ?? 9876
         self.authToken = defaults.string(forKey: "authToken") ?? ""
+
+        // Resolve current audio route name
+        let defaultID = AudioDeviceManager.getDefaultOutputDeviceID()
+        let devices = AudioDeviceManager.allOutputDevices()
+        self.currentRoute = devices.first(where: { $0.id == defaultID })?.name ?? "System Default"
+
+        // Apply saved output device if set
+        let savedDeviceID = defaults.integer(forKey: "outputDeviceID")
+        if savedDeviceID != 0 {
+            _ = AudioDeviceManager.setDefaultOutputDevice(AudioDeviceID(savedDeviceID))
+            self.currentRoute = devices.first(where: { $0.id == AudioDeviceID(savedDeviceID) })?.name ?? self.currentRoute
+        }
 
         Task {
             await engine.setStateCallback { [weak self] newState in
