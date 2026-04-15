@@ -19,19 +19,19 @@ final class AppState: ObservableObject {
         self.serverPort = Int(portString) ?? 9876
         self.authToken = defaults.string(forKey: "authToken") ?? ""
 
-        // Resolve current audio route name
-        let defaultID = AudioDeviceManager.getDefaultOutputDeviceID()
+        // Resolve current audio route name and set output device
         let devices = AudioDeviceManager.allOutputDevices()
-        self.currentRoute = devices.first(where: { $0.id == defaultID })?.name ?? "System Default"
-
-        // Apply saved output device if set
         let savedDeviceID = defaults.integer(forKey: "outputDeviceID")
         if savedDeviceID != 0 {
-            _ = AudioDeviceManager.setDefaultOutputDevice(AudioDeviceID(savedDeviceID))
-            self.currentRoute = devices.first(where: { $0.id == AudioDeviceID(savedDeviceID) })?.name ?? self.currentRoute
+            self.currentRoute = devices.first(where: { $0.id == AudioDeviceID(savedDeviceID) })?.name ?? "System Default"
+        } else {
+            let defaultID = AudioDeviceManager.getDefaultOutputDeviceID()
+            self.currentRoute = devices.first(where: { $0.id == defaultID })?.name ?? "System Default"
         }
 
+        let deviceID = AudioDeviceID(savedDeviceID)
         Task {
+            await engine.setOutputDevice(deviceID)
             await engine.setStateCallback { [weak self] newState in
                 Task { @MainActor in
                     self?.playbackState = newState

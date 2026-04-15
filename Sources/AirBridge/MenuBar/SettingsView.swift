@@ -24,8 +24,16 @@ struct SettingsView: View {
                 }
                 .onChange(of: selectedDeviceID) { _, newValue in
                     savedDeviceID = Int(newValue)
+                    // Update engine output device for next playback
+                    Task {
+                        await appState.engine.setOutputDevice(newValue)
+                    }
+                    // Update route display
                     if newValue != 0 {
-                        _ = AudioDeviceManager.setDefaultOutputDevice(newValue)
+                        appState.currentRoute = outputDevices.first(where: { $0.id == newValue })?.name ?? "System Default"
+                    } else {
+                        let defaultID = AudioDeviceManager.getDefaultOutputDeviceID()
+                        appState.currentRoute = outputDevices.first(where: { $0.id == defaultID })?.name ?? "System Default"
                     }
                 }
 
@@ -77,7 +85,11 @@ struct SettingsView: View {
 
     private func refreshDevices() {
         outputDevices = AudioDeviceManager.allOutputDevices()
-        let currentDefault = AudioDeviceManager.getDefaultOutputDeviceID()
-        appState.currentRoute = outputDevices.first(where: { $0.id == currentDefault })?.name ?? "System Default"
+        if selectedDeviceID != 0 {
+            appState.currentRoute = outputDevices.first(where: { $0.id == selectedDeviceID })?.name ?? "System Default"
+        } else {
+            let currentDefault = AudioDeviceManager.getDefaultOutputDeviceID()
+            appState.currentRoute = outputDevices.first(where: { $0.id == currentDefault })?.name ?? "System Default"
+        }
     }
 }
