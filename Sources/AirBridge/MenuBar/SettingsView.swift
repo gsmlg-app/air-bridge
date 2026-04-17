@@ -1,5 +1,5 @@
+import AVFoundation
 import SwiftUI
-import AVKit
 
 struct SettingsView: View {
     @ObservedObject var appState: AppState
@@ -7,90 +7,89 @@ struct SettingsView: View {
     @AppStorage("listenAddress") private var listenAddress: String = "127.0.0.1"
     @AppStorage("serverPort") private var portString: String = "9876"
     @AppStorage("authToken") private var authToken: String = ""
-    @AppStorage("outputDeviceID") private var savedDeviceID: Int = 0
+    @AppStorage("engineOutputDeviceUID") private var savedDeviceUID: String = ""
+    @AppStorage("followSystemDefault") private var followSystemDefault: Bool = false
 
-    @State private var outputDevices: [AudioOutputDevice] = []
-    @State private var selectedDeviceID: AudioDeviceID = 0
+    @State private var outputDevices: [AudioOutputDeviceInfo] = []
+    @State private var selectedDeviceUID: String = ""
 
     var body: some View {
         Form {
             Section("Audio Output") {
-                Picker("Play Target", selection: $selectedDeviceID) {
-                    Text("System Default").tag(AudioDeviceID(0))
+                Picker("Output Device", selection: $selectedDeviceUID) {
+                    Text("System Default").tag("")
                     ForEach(outputDevices) { device in
-                        Text("\(device.name) (\(device.transportLabel))")
+                        Text("\(device.name) (\(device.transport.rawValue))")
                             .tag(device.id)
                     }
                 }
-                .onChange(of: selectedDeviceID) { _, newValue in
-                    savedDeviceID = Int(newValue)
-                    // Change the system default output device.
-                    // AVAudioEngine plays through the system default,
-                    // so this ensures audio goes to the selected device.
-                    // For AirPlay/HomePod: use the AirPlay button below instead.
-                    if newValue != 0 {
-                        _ = AudioDeviceManager.setDefaultOutputDevice(newValue)
-                        appState.currentRoute = outputDevices.first(where: { $0.id == newValue })?.name ?? "System Default"
-                    } else {
-                        let defaultID = AudioDeviceManager.getDefaultOutputDeviceID()
-                        appState.currentRoute = outputDevices.first(where: { $0.id == defaultID })?.name ?? "System Default"
+                .onChange(of: selectedDeviceUID) { _, newUID in
+                    savedDeviceUID = newUID
+                    if !newUID.isEmpty {
+                        Task {
+                            do {
+                                _ = try await appState.engine.setOutputDevice(uid: newUID)
+                                appState.currentOutputUID = newUID
+                                appState.currentOutputName = outputDevices.first { $0.id == newUID }?.name ?? "Unknown"
+                            } catch {
+                                selectedDeviceUID = appState.currentOutputUID
+                            }
+                        }
                     }
                 }
 
+                Toggle("Follow system default", isOn: $followSystemDefault)
+                    .help("Automatically re-pin engine when system default changes")
+
                 HStack {
                     RoutePickerWrapper()
-                        .frame(width: 24, height: 24)
-                    Text("Select HomePod / AirPlay target here")
+                        .frame(width: 30, height: 30)
+                    Text("AirPlay / HomePod")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                Text("For HomePod: click the AirPlay button above, select your HomePod, then set Play Target to \"System Default\".")
+
+                Button("Refresh Devices") { refreshDevices() }
+
+                Text("Use the AirPlay button to discover HomePods. They will then appear in the device list above.")
                     .font(.caption)
                     .foregroundColor(.secondary)
-
-                Button("Refresh Device List") {
-                    refreshDevices()
-                }
-                .font(.caption)
             }
 
             Section("Server") {
-                TextField("Listen Address", text: $listenAddress)
-                    .frame(width: 200)
-                TextField("Port", text: $portString)
-                    .frame(width: 80)
+                HStack {
+                    Text("Address")
+                    TextField("Address", text: $listenAddress)
+                        .frame(width: 200)
+                }
+                HStack {
+                    Text("Port")
+                    TextField("Port", text: $portString)
+                        .frame(width: 80)
+                }
             }
 
             Section("Authentication") {
                 SecureField("Auth Token", text: $authToken)
-                    .frame(width: 200)
-                Text("Leave empty to disable authentication.")
+                Text("Leave empty to disable authentication")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
-            Section {
-                Text("Server changes require app restart to take effect.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+            Text("Server changes require app restart")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(.top, 4)
         }
         .formStyle(.grouped)
-        .frame(width: 400, height: 380)
-        .padding()
+        .frame(width: 400, height: 420)
         .onAppear {
             refreshDevices()
-            selectedDeviceID = AudioDeviceID(savedDeviceID)
+            selectedDeviceUID = savedDeviceUID
         }
     }
 
     private func refreshDevices() {
-        outputDevices = AudioDeviceManager.allOutputDevices()
-        if selectedDeviceID != 0 {
-            appState.currentRoute = outputDevices.first(where: { $0.id == selectedDeviceID })?.name ?? "System Default"
-        } else {
-            let currentDefault = AudioDeviceManager.getDefaultOutputDeviceID()
-            appState.currentRoute = outputDevices.first(where: { $0.id == currentDefault })?.name ?? "System Default"
-        }
+        outputDevices = AudioDeviceManager.allOutputDevices(engineTargetUID: savedDeviceUID)
     }
 }
