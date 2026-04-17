@@ -1,48 +1,56 @@
-import Foundation
 import Testing
 @testable import AirBridge
 
-@Test func idleState_isNotPlaying() {
-    let state = PlaybackState.idle
-    #expect(state.isPlaying == false)
-}
+struct PlaybackStateTests {
+    @Test func idleState_isNotPlaying() {
+        let state = PlaybackState.idle
+        #expect(!state.isPlaying)
+        #expect(state.statusString == "idle")
+    }
 
-@Test func playingState_isPlaying() {
-    let state = PlaybackState.playing(file: "/tmp/test.mp3")
-    #expect(state.isPlaying == true)
-}
+    @Test func playingState_isPlaying() {
+        let state = PlaybackState.playing(file: "test.mp3")
+        #expect(state.isPlaying)
+        #expect(state.currentFile == "test.mp3")
+    }
 
-@Test func statusResponse_fromIdleState() {
-    let response = StatusResponse(state: .idle, route: nil)
-    #expect(response.status == "idle")
-    #expect(response.file == nil)
-    #expect(response.error == nil)
-}
+    @Test func errorState_hasMessage() {
+        let state = PlaybackState.error(message: "fail")
+        #expect(state.errorMessage == "fail")
+        #expect(state.statusString == "error")
+    }
 
-@Test func statusResponse_fromPlayingState() {
-    let response = StatusResponse(state: .playing(file: "/tmp/test.mp3"), route: "HomePod Kitchen")
-    #expect(response.status == "playing")
-    #expect(response.file == "/tmp/test.mp3")
-    #expect(response.route == "HomePod Kitchen")
-}
+    @Test func queueTrack_equatable() {
+        let id = UUID()
+        let t1 = QueueTrack(id: id, originalFilename: "a.mp3", stagedPath: "/tmp/a", addedAt: Date(), mimeType: "audio/mpeg")
+        let t2 = QueueTrack(id: id, originalFilename: "a.mp3", stagedPath: "/tmp/a", addedAt: t1.addedAt, mimeType: "audio/mpeg")
+        #expect(t1 == t2)
+    }
 
-@Test func statusResponse_fromErrorState() {
-    let response = StatusResponse(state: .error(message: "decode failed"), route: nil)
-    #expect(response.status == "error")
-    #expect(response.error == "decode failed")
-}
+    @Test func queueState_currentTrack() {
+        let track = QueueTrack(id: UUID(), originalFilename: "a.mp3", stagedPath: "/tmp/a", addedAt: Date(), mimeType: nil)
+        var state = QueueState(tracks: [track], currentIndex: 0)
+        #expect(state.currentTrack?.id == track.id)
+        state.currentIndex = nil
+        #expect(state.currentTrack == nil)
+    }
 
-@Test func playRequest_decodesFromJSON() throws {
-    let json = #"{"path":"/tmp/reply.mp3"}"#
-    let data = json.data(using: .utf8)!
-    let request = try JSONDecoder().decode(PlayRequest.self, from: data)
-    #expect(request.path == "/tmp/reply.mp3")
-}
+    @Test func queueState_empty() {
+        let state = QueueState()
+        #expect(state.isEmpty)
+        #expect(state.currentTrack == nil)
+    }
 
-@Test func statusResponse_encodesToJSON() throws {
-    let response = StatusResponse(state: .playing(file: "/tmp/test.mp3"), route: nil)
-    let data = try JSONEncoder().encode(response)
-    let decoded = try JSONDecoder().decode(StatusResponse.self, from: data)
-    #expect(decoded.status == "playing")
-    #expect(decoded.file == "/tmp/test.mp3")
+    @Test func audioTransport_rawValues() {
+        #expect(AudioTransport.builtIn.rawValue == "built_in")
+        #expect(AudioTransport.airplay.rawValue == "airplay")
+    }
+
+    @Test func enqueueResponse_encodesToJSON() throws {
+        let resp = EnqueueResponse(id: "abc", filename: "test.mp3", position: 0, queue_length: 1)
+        let data = try JSONEncoder().encode(resp)
+        let decoded = try JSONDecoder().decode(EnqueueResponse.self, from: data)
+        #expect(decoded.id == "abc")
+        #expect(decoded.queue_length == 1)
+    }
 }

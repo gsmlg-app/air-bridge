@@ -33,34 +33,132 @@ enum PlaybackState: Sendable, Equatable {
     }
 }
 
-struct PlayRequest: Decodable, Sendable {
-    let path: String
+// MARK: - Queue and Output Device Types
+
+struct QueueTrack: Identifiable, Sendable, Equatable {
+    let id: UUID
+    let originalFilename: String
+    let stagedPath: String
+    let addedAt: Date
+    let mimeType: String?
 }
 
-struct PlayResponse: Codable, Sendable {
-    let status: String
-    let file: String
+struct QueueState: Sendable, Equatable {
+    var tracks: [QueueTrack]
+    var currentIndex: Int?
+
+    init(tracks: [QueueTrack] = [], currentIndex: Int? = nil) {
+        self.tracks = tracks
+        self.currentIndex = currentIndex
+    }
+
+    var currentTrack: QueueTrack? {
+        guard let idx = currentIndex, tracks.indices.contains(idx) else { return nil }
+        return tracks[idx]
+    }
+
+    var isEmpty: Bool { tracks.isEmpty }
 }
 
-struct StopResponse: Codable, Sendable {
-    let status: String
+enum AudioTransport: String, Sendable, Codable {
+    case builtIn = "built_in"
+    case usb
+    case bluetooth
+    case hdmi
+    case airplay
+    case virtual
+    case other
 }
+
+struct AudioOutputDeviceInfo: Identifiable, Sendable, Equatable, Codable {
+    let id: String
+    let name: String
+    let transport: AudioTransport
+    let isSystemDefault: Bool
+    let isEngineTarget: Bool
+}
+
+// MARK: - Error Response (unchanged)
 
 struct ErrorResponse: Codable, Sendable {
     let error: String
     let message: String
 }
 
+// MARK: - v2 API DTOs
+
+struct EnqueueResponse: Codable, Sendable {
+    let id: String
+    let filename: String
+    let position: Int
+    let queue_length: Int
+}
+
+struct PlayNowResponse: Codable, Sendable {
+    let id: String
+    let filename: String
+    let status: String
+    let queue_length: Int
+}
+
+struct QueueListResponse: Codable, Sendable {
+    let current_index: Int?
+    let tracks: [TrackInfo]
+
+    struct TrackInfo: Codable, Sendable {
+        let id: String
+        let filename: String
+        let position: Int
+        let status: String
+    }
+}
+
+struct TrackActionResponse: Codable, Sendable {
+    let status: String
+    let track: TrackRef?
+
+    struct TrackRef: Codable, Sendable {
+        let id: String
+        let filename: String
+    }
+}
+
+struct RemoveResponse: Codable, Sendable {
+    let removed: String
+    let queue_length: Int
+}
+
+struct OutputsResponse: Codable, Sendable {
+    let current_engine_target: String?
+    let current_system_default: String?
+    let current_airplay_route: String?
+    let devices: [AudioOutputDeviceInfo]
+}
+
+struct OutputCurrentResponse: Codable, Sendable {
+    let id: String
+    let name: String
+    let transport: String
+    let hot_swapped: Bool?
+}
+
 struct StatusResponse: Codable, Sendable {
     let status: String
-    let file: String?
-    let route: String?
+    let track: TrackRef?
+    let queue_length: Int
+    let queue_position: Int?
+    let output: OutputInfo?
     let error: String?
 
-    init(state: PlaybackState, route: String?) {
-        self.status = state.statusString
-        self.file = state.currentFile
-        self.route = route
-        self.error = state.errorMessage
+    struct TrackRef: Codable, Sendable {
+        let id: String
+        let filename: String
+    }
+
+    struct OutputInfo: Codable, Sendable {
+        let engine_target: String?
+        let engine_target_name: String?
+        let system_default: String?
+        let airplay_route: String?
     }
 }
