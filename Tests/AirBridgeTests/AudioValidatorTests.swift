@@ -51,3 +51,13 @@ import Foundation
     #expect(AudioValidationError.unsupportedFormat.errorDescription != nil)
     #expect(AudioValidationError.emptyFile.errorDescription != nil)
 }
+
+@Test func validateExtension_supported() {
+    let result = AudioValidator.validateExtension("test.mp3")
+    #expect(result == .success("mp3"))
+}
+
+@Test func validateExtension_unsupported() {
+    let result = AudioValidator.validateExtension("test.ogg")
+    #expect(result == .failure(.unsupportedFormat))
+}

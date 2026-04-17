@@ -52,4 +52,12 @@ enum AudioValidator {
 
         return .success(path)
     }
+
+    static func validateExtension(_ filename: String) -> Result<String, AudioValidationError> {
+        let ext = (filename as NSString).pathExtension.lowercased()
+        guard supportedExtensions.contains(ext) else {
+            return .failure(.unsupportedFormat)
+        }
+        return .success(ext)
+    }
 }
