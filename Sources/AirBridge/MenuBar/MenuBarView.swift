@@ -6,44 +6,88 @@ struct MenuBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             statusRow
-            Divider()
 
+            // Current track
             if let file = appState.playbackState.currentFile {
-                Label(URL(fileURLWithPath: file).lastPathComponent, systemImage: "music.note")
-                    .font(.caption)
-                    .lineLimit(1)
+                HStack {
+                    Image(systemName: "music.note")
+                    Text(file)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .font(.caption)
             }
 
-            if appState.playbackState.isPlaying {
-                Button("Stop") {
-                    Task { await appState.stop() }
+            Divider()
+
+            // Queue
+            QueueListView(queueState: appState.queueState)
+
+            // Skip controls
+            if appState.queueState.tracks.count > 1 {
+                HStack {
+                    Button(action: {
+                        Task { _ = await appState.queue.previous() }
+                    }) {
+                        Image(systemName: "backward.fill")
+                    }
+                    .buttonStyle(.borderless)
+
+                    Button(action: {
+                        Task { _ = await appState.queue.next() }
+                    }) {
+                        Image(systemName: "forward.fill")
+                    }
+                    .buttonStyle(.borderless)
                 }
             }
 
-            if case .error(let msg) = appState.playbackState {
-                Label(msg, systemImage: "exclamationmark.triangle")
+            Divider()
+
+            // Engine target
+            HStack {
+                Text("Playing through:")
                     .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(appState.currentOutputName)
+                    .font(.caption)
+                    .bold()
+
+                if !appState.currentOutputUID.isEmpty {
+                    let defaultUID = AudioDeviceManager.deviceUID(for: AudioDeviceManager.getDefaultOutputDeviceID())
+                    if appState.currentOutputUID != defaultUID {
+                        Image(systemName: "info.circle")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                            .help("Engine target differs from system default")
+                    }
+                }
+            }
+
+            // Error
+            if let error = appState.playbackState.errorMessage {
+                Text(error)
                     .foregroundColor(.red)
+                    .font(.caption)
             }
 
             Divider()
+
+            // Server info
             HStack {
-                Label("Route: \(appState.currentRoute)", systemImage: "airplayaudio")
-                    .font(.caption)
-                Spacer()
-                RoutePickerWrapper()
-                    .frame(width: 20, height: 20)
+                Image(systemName: "network")
+                Text("\(appState.listenAddress):\(appState.serverPort)")
             }
-            Label("Listening on \(appState.listenAddress):\(appState.serverPort)", systemImage: "network")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Divider()
+            .font(.caption)
+            .foregroundColor(.secondary)
+
             Button("Quit") {
+                FileStaging.clearAll()
                 NSApplication.shared.terminate(nil)
             }
         }
         .padding(8)
-        .frame(width: 240)
+        .frame(width: 260)
     }
 
     private var statusRow: some View {
@@ -51,17 +95,25 @@ struct MenuBarView: View {
             Circle()
                 .fill(statusColor)
                 .frame(width: 8, height: 8)
-            Text("AirBridge — \(appState.playbackState.statusString)")
+            Text(appState.playbackState.statusString.capitalized)
                 .font(.headline)
+
+            Spacer()
+
+            if !appState.queueState.isEmpty {
+                Text("\(appState.queueState.tracks.count) tracks")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
     }
 
     private var statusColor: Color {
         switch appState.playbackState {
-        case .idle: .green
-        case .playing: .blue
-        case .paused: .yellow
-        case .error: .red
+        case .idle: return .green
+        case .playing: return .blue
+        case .paused: return .yellow
+        case .error: return .red
         }
     }
 }
