@@ -2,7 +2,7 @@ import CoreAudio
 import os
 
 final class OutputDeviceObserver: Sendable {
-    private let callback: @Sendable (AudioDeviceID) -> Void
+    fileprivate let callback: @Sendable (AudioDeviceID) -> Void
 
     init(onChange callback: @escaping @Sendable (AudioDeviceID) -> Void) {
         self.callback = callback
