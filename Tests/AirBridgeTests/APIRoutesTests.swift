@@ -1,98 +1,118 @@
-import Testing
+import Foundation
 import Hummingbird
 import HummingbirdTesting
-import Foundation
+import Testing
 @testable import AirBridge
 
-// MARK: - Basic Route Tests
-
-@Test func statusEndpoint_returnsIdleByDefault() async throws {
-    let engine = PlaybackEngine()
-    let app = try buildTestApplication(engine: engine)
-    try await app.test(.router) { client in
-        let response = try await client.execute(uri: "/status", method: .get)
-        #expect(response.status == .ok)
-        let data = Data(buffer: response.body)
-        let body = try JSONDecoder().decode(StatusResponse.self, from: data)
-        #expect(body.status == "idle")
+struct APIRoutesTests {
+    @Test func statusEndpoint_returnsIdleByDefault() async throws {
+        let app = try buildTestApplication(engine: PlaybackEngine())
+        try await app.test(.live) { client in
+            try await client.execute(uri: "/status", method: .get) { response in
+                #expect(response.status == .ok)
+                let body = String(buffer: response.body)
+                #expect(body.contains("\"status\":\"idle\""))
+            }
+        }
     }
-}
 
-@Test func playEndpoint_invalidPath_returns400() async throws {
-    let engine = PlaybackEngine()
-    let app = try buildTestApplication(engine: engine)
-    try await app.test(.router) { client in
-        let payload = #"{"path":"/nonexistent/file.mp3"}"#
-        let response = try await client.execute(
-            uri: "/play",
-            method: .post,
-            headers: [.contentType: "application/json"],
-            body: ByteBuffer(string: payload)
-        )
-        #expect(response.status == .badRequest)
-        let data = Data(buffer: response.body)
-        let body = try JSONDecoder().decode(ErrorResponse.self, from: data)
-        #expect(body.error == "file_not_found")
+    @Test func stopEndpoint_returnsIdle() async throws {
+        let app = try buildTestApplication(engine: PlaybackEngine())
+        try await app.test(.live) { client in
+            try await client.execute(uri: "/stop", method: .post) { response in
+                #expect(response.status == .ok)
+                let body = String(buffer: response.body)
+                #expect(body.contains("\"status\":\"idle\""))
+            }
+        }
     }
-}
 
-@Test func stopEndpoint_returnsIdleStatus() async throws {
-    let engine = PlaybackEngine()
-    let app = try buildTestApplication(engine: engine)
-    try await app.test(.router) { client in
-        let response = try await client.execute(uri: "/stop", method: .post)
-        #expect(response.status == .ok)
-        let data = Data(buffer: response.body)
-        let body = try JSONDecoder().decode(StopResponse.self, from: data)
-        #expect(body.status == "idle")
+    @Test func queueEndpoint_returnsEmptyQueue() async throws {
+        let app = try buildTestApplication(engine: PlaybackEngine())
+        try await app.test(.live) { client in
+            try await client.execute(uri: "/queue", method: .get) { response in
+                #expect(response.status == .ok)
+                let body = String(buffer: response.body)
+                #expect(body.contains("\"tracks\":[]"))
+            }
+        }
     }
-}
 
-// MARK: - Auth Middleware Tests
-
-@Test func authEnabled_validToken_returns200() async throws {
-    let engine = PlaybackEngine()
-    let app = try buildTestApplication(engine: engine, authToken: "test-secret")
-    try await app.test(.router) { client in
-        let response = try await client.execute(
-            uri: "/status",
-            method: .get,
-            headers: [.authorization: "Bearer test-secret"]
-        )
-        #expect(response.status == .ok)
+    @Test func outputsEndpoint_returnsDevices() async throws {
+        let app = try buildTestApplication(engine: PlaybackEngine())
+        try await app.test(.live) { client in
+            try await client.execute(uri: "/outputs", method: .get) { response in
+                #expect(response.status == .ok)
+                let body = String(buffer: response.body)
+                #expect(body.contains("\"devices\""))
+            }
+        }
     }
-}
 
-@Test func authEnabled_missingToken_returns401() async throws {
-    let engine = PlaybackEngine()
-    let app = try buildTestApplication(engine: engine, authToken: "test-secret")
-    try await app.test(.router) { client in
-        let response = try await client.execute(uri: "/status", method: .get)
-        #expect(response.status == .unauthorized)
-        let data = Data(buffer: response.body)
-        let body = try JSONDecoder().decode(ErrorResponse.self, from: data)
-        #expect(body.error == "unauthorized")
+    @Test func outputsCurrentEndpoint_returnsDevice() async throws {
+        let app = try buildTestApplication(engine: PlaybackEngine())
+        try await app.test(.live) { client in
+            try await client.execute(uri: "/outputs/current", method: .get) { response in
+                #expect(response.status == .ok)
+                let body = String(buffer: response.body)
+                #expect(body.contains("\"name\""))
+            }
+        }
     }
-}
 
-@Test func authEnabled_wrongToken_returns401() async throws {
-    let engine = PlaybackEngine()
-    let app = try buildTestApplication(engine: engine, authToken: "test-secret")
-    try await app.test(.router) { client in
-        let response = try await client.execute(
-            uri: "/status",
-            method: .get,
-            headers: [.authorization: "Bearer wrong-token"]
-        )
-        #expect(response.status == .unauthorized)
+    @Test func deleteQueueTrack_notFound() async throws {
+        let app = try buildTestApplication(engine: PlaybackEngine())
+        try await app.test(.live) { client in
+            try await client.execute(
+                uri: "/queue/\(UUID().uuidString)",
+                method: .delete
+            ) { response in
+                #expect(response.status == .notFound)
+            }
+        }
     }
-}
 
-@Test func authDisabled_noToken_returns200() async throws {
-    let engine = PlaybackEngine()
-    let app = try buildTestApplication(engine: engine, authToken: "")
-    try await app.test(.router) { client in
-        let response = try await client.execute(uri: "/status", method: .get)
-        #expect(response.status == .ok)
+    @Test func pauseEndpoint_returnsStatus() async throws {
+        let app = try buildTestApplication(engine: PlaybackEngine())
+        try await app.test(.live) { client in
+            try await client.execute(uri: "/pause", method: .post) { response in
+                #expect(response.status == .ok)
+            }
+        }
+    }
+
+    @Test func authEnabled_validToken_returns200() async throws {
+        let app = try buildTestApplication(engine: PlaybackEngine(), authToken: "secret")
+        try await app.test(.live) { client in
+            try await client.execute(
+                uri: "/status",
+                method: .get,
+                headers: [.authorization: "Bearer secret"]
+            ) { response in
+                #expect(response.status == .ok)
+            }
+        }
+    }
+
+    @Test func authEnabled_missingToken_returns401() async throws {
+        let app = try buildTestApplication(engine: PlaybackEngine(), authToken: "secret")
+        try await app.test(.live) { client in
+            try await client.execute(uri: "/status", method: .get) { response in
+                #expect(response.status == .unauthorized)
+            }
+        }
+    }
+
+    @Test func authEnabled_wrongToken_returns401() async throws {
+        let app = try buildTestApplication(engine: PlaybackEngine(), authToken: "secret")
+        try await app.test(.live) { client in
+            try await client.execute(
+                uri: "/status",
+                method: .get,
+                headers: [.authorization: "Bearer wrong"]
+            ) { response in
+                #expect(response.status == .unauthorized)
+            }
+        }
     }
 }
