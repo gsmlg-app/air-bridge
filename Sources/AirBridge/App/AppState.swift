@@ -18,6 +18,7 @@ final class AppState: ObservableObject {
     let engine = PlaybackEngine()
     let queue: PlaybackQueue
     let discovery = BonjourDiscovery()
+    let advertiser = ServiceAdvertiser()
     private var serverTask: Task<Void, Never>?
     private var discoveryTask: Task<Void, Never>?
 
@@ -105,6 +106,7 @@ extension AppState {
         let authToken = self.authToken
 
         self.serverRunning = true
+        Task { await advertiser.start(port: UInt16(port)) }
         self.serverTask = Task.detached { [weak self] in
             do {
                 let app = try buildApplication(
@@ -131,6 +133,7 @@ extension AppState {
     }
 
     func stopServer() async {
+        await advertiser.stop()
         guard let task = serverTask else { return }
         Log.server.info("Stopping server")
         task.cancel()
