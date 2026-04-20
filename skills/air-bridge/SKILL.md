@@ -87,14 +87,81 @@ r = requests.get(f"{BASE}/outputs/current")
 requests.put(f"{BASE}/outputs/current", json={"id": "BONJOUR-SERVICE-ID"})
 ```
 
+## Service Discovery (mDNS)
+
+AirBridge advertises itself on the local network as `_air-bridge._tcp` via mDNS/Bonjour. Clients can discover it automatically instead of hardcoding an IP and port.
+
+```python
+from zeroconf import ServiceBrowser, Zeroconf
+
+class AirBridgeListener:
+    def add_service(self, zc, type_, name):
+        info = zc.get_service_info(type_, name)
+        if info:
+            host = info.parsed_addresses()[0]
+            port = info.port
+            print(f"Found AirBridge at http://{host}:{port}")
+
+    def remove_service(self, zc, type_, name):
+        print(f"AirBridge removed: {name}")
+
+    def update_service(self, zc, type_, name):
+        pass
+
+zc = Zeroconf()
+browser = ServiceBrowser(zc, "_air-bridge._tcp.local.", AirBridgeListener())
+
+# Keep running to listen for services, or use in a script:
+import time
+try:
+    time.sleep(5)  # wait for discovery
+finally:
+    zc.close()
+```
+
+You can also use `dns-sd` from the command line to verify the service is advertised:
+
+```bash
+dns-sd -B _air-bridge._tcp local.
+```
+
+### Auto-discovering BASE URL
+
+```python
+from zeroconf import Zeroconf, ServiceBrowser
+import time
+
+def discover_airbridge(timeout=5):
+    """Discover AirBridge on the local network and return its base URL."""
+    result = {}
+
+    class Listener:
+        def add_service(self, zc, type_, name):
+            info = zc.get_service_info(type_, name)
+            if info:
+                result["url"] = f"http://{info.parsed_addresses()[0]}:{info.port}"
+        def remove_service(self, *a): pass
+        def update_service(self, *a): pass
+
+    zc = Zeroconf()
+    ServiceBrowser(zc, "_air-bridge._tcp.local.", Listener())
+    time.sleep(timeout)
+    zc.close()
+    return result.get("url")
+
+BASE = discover_airbridge() or "http://127.0.0.1:9876"
+```
+
+This requires the `zeroconf` package (`pip install zeroconf`).
+
 ## LAN / Cross-Machine Usage
 
-When calling from another machine (e.g., OpenClaw on Linux), the AirBridge Settings must be configured for LAN access: set the listen address to `0.0.0.0` (or the Mac's LAN IP), set an auth token, and restart the server.
+When calling from another machine (e.g., OpenClaw on Linux), the AirBridge Settings must be configured for LAN access: set the listen address to `0.0.0.0` (or the Mac's LAN IP), set an auth token, and restart the server. Clients on the same network can then discover AirBridge via mDNS (see above) or connect directly.
 
 ```python
 import requests
 
-BASE = "http://mac-ip:9876"
+BASE = discover_airbridge() or "http://mac-ip:9876"
 HEADERS = {"Authorization": "Bearer YOUR_TOKEN"}
 
 with open("/tmp/reply.mp3", "rb") as f:
