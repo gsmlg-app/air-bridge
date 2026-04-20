@@ -9,12 +9,28 @@ AirBridge is a relay bridge between [OpenClaw](https://github.com/gsmlg-app/open
 - macOS 14 (Sonoma) or later
 - Swift 5.10+
 
-## Build & Run
+## Build
 
 ```bash
-swift build
-.build/debug/AirBridge
+# Install XcodeGen (one-time)
+brew install xcodegen
+
+# Generate Xcode project
+xcodegen generate
+
+# Open in Xcode
+open AirBridge.xcodeproj
+
+# Or build from command line
+xcodebuild -project AirBridge.xcodeproj -scheme AirBridge build
+
+# Run tests
+swift test
 ```
+
+## Run
+
+The app is built as an Xcode project with Mac App Store entitlements and App Sandbox enabled. Open the project in Xcode and press Cmd+R to run, or open the built `.app` bundle from `build/Release/AirBridge.app`.
 
 The app appears as a menu bar icon (AirPlay audio symbol); it has no Dock icon (`LSUIElement = true`). Click the icon for queue status, track navigation, the current engine target, and **Settings…** / **Quit**.
 
@@ -120,6 +136,10 @@ BonjourDiscovery (actor)
 - Device identification uses stable Bonjour service IDs.
 - AirPlay 2 protocol integration is phased: Phase 1 (Bonjour discovery + session skeleton) is complete.
 - Logging via `os.Logger`, subsystem `com.gsmlg.airbridge` (categories: `http`, `playback`, `server`, `queue`, `output`).
+
+## Mac App Store Distribution
+
+AirBridge is configured for distribution via the Mac App Store with **App Sandbox** enabled. The project's entitlements and code signing are pre-configured to pass App Store review. To submit, generate a Release build in Xcode and follow Apple's standard App Store submission workflow.
 
 ## Tests
 
