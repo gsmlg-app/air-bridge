@@ -9,7 +9,46 @@ AirBridge runs as a macOS menu bar app on `http://127.0.0.1:9876` by default. It
 
 Use the CLI tool at `skills/air-bridge/airbridge.py` (Python 3, stdlib only, no dependencies) to interact with AirBridge.
 
-## Upload and Play Audio
+## Command Reference
+
+```
+airbridge.py [-H HOST] [-p PORT] [-t TOKEN] <command> [args]
+```
+
+### Global Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-H, --host HOST` | `127.0.0.1` | AirBridge server host |
+| `-p, --port PORT` | `9876` | AirBridge server port |
+| `-t, --token TOKEN` | *(none)* | Bearer auth token |
+
+### Commands
+
+| Command | Arguments | Description |
+|---------|-----------|-------------|
+| `play` | `<file>` | Upload an audio file and play it immediately (inserts at current+1 and skips) |
+| `queue` | `<file>` | Upload an audio file and append to the end of the queue |
+| `queue-list` | | List all tracks in the queue with id, filename, position, status |
+| `queue-next` | | Skip to the next track |
+| `queue-prev` | | Go back to the previous track |
+| `queue-remove` | `<id>` | Remove a track by its UUID |
+| `queue-move` | `<id> <position>` | Move a track to a new 0-based position |
+| `status` | | Show playback status (status, track, queue_length, queue_position, output, error) |
+| `pause` | | Pause playback |
+| `resume` | | Resume playback |
+| `stop` | | Stop playback and clear the entire queue |
+| `outputs` | | List all discovered AirPlay devices |
+| `output` | | Show the currently selected AirPlay device |
+| `output-set` | `<id>` | Select an AirPlay device by its Bonjour service ID |
+
+All commands print JSON to stdout. Errors print to stderr and exit with code 1.
+
+Supported audio formats: `mp3`, `wav`, `m4a`, `aiff`. Max 50 MB per file.
+
+## Examples
+
+### Upload and Play Audio
 
 ```bash
 # Enqueue a file (appends to the end of the queue)
@@ -19,16 +58,14 @@ python skills/air-bridge/airbridge.py queue track.mp3
 python skills/air-bridge/airbridge.py play alert.mp3
 ```
 
-Supported formats: `mp3`, `wav`, `m4a`, `aiff`. Max 50 MB per file.
-
-## Check Status
+### Check Status
 
 ```bash
 python skills/air-bridge/airbridge.py status
 # Returns JSON: status, track, queue_length, queue_position, output, error
 ```
 
-## Playback Controls
+### Playback Controls
 
 ```bash
 python skills/air-bridge/airbridge.py pause
@@ -36,7 +73,7 @@ python skills/air-bridge/airbridge.py resume
 python skills/air-bridge/airbridge.py stop   # stops playback and clears the queue
 ```
 
-## Queue Management
+### Queue Management
 
 ```bash
 # List tracks
@@ -53,7 +90,7 @@ python skills/air-bridge/airbridge.py queue-remove TRACK-UUID
 python skills/air-bridge/airbridge.py queue-move TRACK-UUID 0
 ```
 
-## Output Device Selection
+### Output Device Selection
 
 ```bash
 # List discovered AirPlay devices
@@ -66,7 +103,7 @@ python skills/air-bridge/airbridge.py output
 python skills/air-bridge/airbridge.py output-set BONJOUR-SERVICE-ID
 ```
 
-## LAN / Cross-Machine Usage
+### LAN / Cross-Machine Usage
 
 When calling from another machine (e.g., OpenClaw on Linux), the AirBridge Settings must be configured for LAN access: set the listen address to `0.0.0.0` (or the Mac's LAN IP), set an auth token, and restart the server.
 
