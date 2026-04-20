@@ -1,4 +1,5 @@
 import AVFoundation
+import AppKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -7,89 +8,127 @@ struct SettingsView: View {
     @AppStorage("listenAddress") private var listenAddress: String = "127.0.0.1"
     @AppStorage("serverPort") private var portString: String = "9876"
     @AppStorage("authToken") private var authToken: String = ""
-    @AppStorage("engineOutputDeviceUID") private var savedDeviceUID: String = ""
-    @AppStorage("followSystemDefault") private var followSystemDefault: Bool = false
-
-    @State private var outputDevices: [AudioOutputDeviceInfo] = []
-    @State private var selectedDeviceUID: String = ""
+    @AppStorage("selectedAirPlayDeviceID") private var selectedDeviceID: String = ""
 
     var body: some View {
         Form {
-            Section("Audio Output") {
-                Picker("Output Device", selection: $selectedDeviceUID) {
-                    Text("System Default").tag("")
-                    ForEach(outputDevices) { device in
-                        Text("\(device.name) (\(device.transport.rawValue))")
-                            .tag(device.id)
+            Section("AirPlay Output") {
+                if appState.airplayDevices.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Scanning for AirPlay devices…", systemImage: "dot.radiowaves.left.and.right")
+                            .foregroundColor(.secondary)
+                        Text("HomePods and Apple TVs on your Wi-Fi network should appear here within a few seconds.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
-                }
-                .onChange(of: selectedDeviceUID) { _, newUID in
-                    savedDeviceUID = newUID
-                    if !newUID.isEmpty {
-                        Task {
-                            do {
-                                _ = try await appState.engine.setOutputDevice(uid: newUID)
-                                appState.currentOutputUID = newUID
-                                appState.currentOutputName = outputDevices.first { $0.id == newUID }?.name ?? "Unknown"
-                            } catch {
-                                selectedDeviceUID = appState.currentOutputUID
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(appState.airplayDevices) { device in
+                            Toggle(isOn: binding(for: device)) {
+                                HStack(spacing: 6) {
+                                    Text(device.displayName)
+                                    if let model = device.modelID {
+                                        Text("(\(model))")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    if device.supportsAirPlay2 {
+                                        Text("AirPlay 2")
+                                            .font(.caption2)
+                                            .padding(.horizontal, 4)
+                                            .background(Color.blue.opacity(0.2))
+                                            .cornerRadius(3)
+                                    }
+                                }
                             }
+                            .toggleStyle(.checkbox)
                         }
                     }
                 }
 
-                Toggle("Follow system default", isOn: $followSystemDefault)
-                    .help("Automatically re-pin engine when system default changes")
-
                 HStack {
-                    RoutePickerWrapper()
-                        .frame(width: 30, height: 30)
-                    Text("AirPlay / HomePod")
+                    Text("Selected: \(selectedDeviceDisplayName)")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                    Spacer()
+                    Text("\(appState.airplayDevices.count) device(s)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
-
-                Button("Refresh Devices") { refreshDevices() }
-
-                Text("Use the AirPlay button to discover HomePods. They will then appear in the device list above.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
 
             Section("Server") {
-                HStack {
-                    Text("Address")
-                    TextField("Address", text: $listenAddress)
-                        .frame(width: 200)
-                }
-                HStack {
-                    Text("Port")
-                    TextField("Port", text: $portString)
-                        .frame(width: 80)
-                }
+                TextField("Address", text: $listenAddress)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Port", text: $portString)
+                    .textFieldStyle(.roundedBorder)
             }
 
             Section("Authentication") {
-                SecureField("Auth Token", text: $authToken)
+                HStack {
+                    TextField("Auth Token", text: $authToken)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Generate") {
+                        authToken = Self.generateAuthToken()
+                    }
+                    .help("Generate a new random 32-character token")
+                }
                 Text("Leave empty to disable authentication")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
-            Text("Server changes require app restart")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .padding(.top, 4)
+            Section {
+                HStack {
+                    Circle()
+                        .fill(appState.serverRunning ? Color.green : Color.red)
+                        .frame(width: 8, height: 8)
+                    Text(appState.serverRunning ? "Server running" : "Server stopped")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button("Restart Server") {
+                        Task { await appState.restartServer() }
+                    }
+                }
+                Text("Applies the current address, port, and token.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 400, height: 420)
-        .onAppear {
-            refreshDevices()
-            selectedDeviceUID = savedDeviceUID
+        .frame(width: 420, height: 520)
+        .onDisappear {
+            NSApp.setActivationPolicy(.accessory)
         }
     }
 
-    private func refreshDevices() {
-        outputDevices = AudioDeviceManager.allOutputDevices(engineTargetUID: savedDeviceUID)
+    private var selectedDeviceDisplayName: String {
+        if selectedDeviceID.isEmpty { return "(none)" }
+        return appState.airplayDevices.first { $0.id == selectedDeviceID }?.displayName ?? selectedDeviceID
+    }
+
+    private func binding(for device: AirPlayDevice) -> Binding<Bool> {
+        Binding(
+            get: { selectedDeviceID == device.id },
+            set: { isOn in
+                if isOn {
+                    selectedDeviceID = device.id
+                    Task { await appState.selectAirPlayDevice(device) }
+                } else {
+                    selectedDeviceID = ""
+                    Task { await appState.selectAirPlayDevice(nil) }
+                }
+            }
+        )
+    }
+
+    private static func generateAuthToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 24)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }

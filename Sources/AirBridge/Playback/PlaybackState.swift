@@ -128,18 +128,25 @@ struct RemoveResponse: Codable, Sendable {
     let queue_length: Int
 }
 
+struct AirPlayDeviceInfo: Codable, Sendable {
+    let id: String
+    let name: String
+    let model: String?
+    let supports_airplay_2: Bool
+    let requires_pairing: Bool
+    let is_selected: Bool
+}
+
 struct OutputsResponse: Codable, Sendable {
-    let current_engine_target: String?
-    let current_system_default: String?
-    let current_airplay_route: String?
-    let devices: [AudioOutputDeviceInfo]
+    let selected: AirPlayDeviceInfo?
+    let devices: [AirPlayDeviceInfo]
 }
 
 struct OutputCurrentResponse: Codable, Sendable {
     let id: String
     let name: String
-    let transport: String
-    let hot_swapped: Bool?
+    let model: String?
+    let supports_airplay_2: Bool
 }
 
 struct StatusResponse: Codable, Sendable {
@@ -156,9 +163,7 @@ struct StatusResponse: Codable, Sendable {
     }
 
     struct OutputInfo: Codable, Sendable {
-        let engine_target: String?
-        let engine_target_name: String?
-        let system_default: String?
-        let airplay_route: String?
+        let airplay_device_id: String?
+        let airplay_device_name: String?
     }
 }

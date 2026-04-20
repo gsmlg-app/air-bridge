@@ -1,7 +1,9 @@
+import AppKit
 import SwiftUI
 
 struct MenuBarView: View {
     @ObservedObject var appState: AppState
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -44,23 +46,19 @@ struct MenuBarView: View {
 
             Divider()
 
-            // Engine target
+            // AirPlay target
             HStack {
-                Text("Playing through:")
+                Image(systemName: "airplayaudio")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text(appState.currentOutputName)
-                    .font(.caption)
-                    .bold()
-
-                if !appState.currentOutputUID.isEmpty {
-                    let defaultUID = AudioDeviceManager.deviceUID(for: AudioDeviceManager.getDefaultOutputDeviceID())
-                    if appState.currentOutputUID != defaultUID {
-                        Image(systemName: "info.circle")
-                            .font(.caption2)
-                            .foregroundColor(.orange)
-                            .help("Engine target differs from system default")
-                    }
+                if let device = appState.selectedDevice {
+                    Text(device.displayName)
+                        .font(.caption)
+                        .bold()
+                } else {
+                    Text("No AirPlay device")
+                        .font(.caption)
+                        .foregroundColor(.orange)
                 }
             }
 
@@ -76,14 +74,24 @@ struct MenuBarView: View {
             // Server info
             HStack {
                 Image(systemName: "network")
-                Text("\(appState.listenAddress):\(appState.serverPort)")
+                Text(verbatim: "\(appState.listenAddress):\(appState.serverPort)")
             }
             .font(.caption)
             .foregroundColor(.secondary)
 
-            Button("Quit") {
-                FileStaging.clearAll()
-                NSApplication.shared.terminate(nil)
+            HStack {
+                Button("Settings…") {
+                    NSApp.setActivationPolicy(.regular)
+                    NSApp.activate(ignoringOtherApps: true)
+                    openSettings()
+                }
+
+                Spacer()
+
+                Button("Quit") {
+                    FileStaging.clearAll()
+                    NSApplication.shared.terminate(nil)
+                }
             }
         }
         .padding(8)

@@ -1,16 +1,20 @@
-import AVFoundation
-import CoreAudio
+import Foundation
 import os
 
+/// Playback is implemented on top of an `AirPlaySession` which — once Phases 2–5
+/// are complete — will stream audio directly to a HomePod over AirPlay 2. Phase 1
+/// holds the session skeleton; actual playback calls throw "not implemented" until
+/// the protocol stack lands.
 actor PlaybackEngine {
     private(set) var state: PlaybackState = .idle
 
-    private var engine: AVAudioEngine?
-    private var playerNode: AVAudioPlayerNode?
-    private var audioFile: AVAudioFile?
-    private var currentDeviceUID: String?
+    let session: AirPlaySession
     private var stateCallback: (@Sendable (PlaybackState) -> Void)?
     private var trackFinishedCallback: (@Sendable () async -> Void)?
+
+    init(session: AirPlaySession = AirPlaySession()) {
+        self.session = session
+    }
 
     func setStateCallback(_ callback: @escaping @Sendable (PlaybackState) -> Void) {
         self.stateCallback = callback
@@ -20,163 +24,65 @@ actor PlaybackEngine {
         self.trackFinishedCallback = callback
     }
 
-    // MARK: - Output Device
+    // MARK: - Device selection
 
-    func setOutputDevice(uid: String) async throws -> Bool {
-        let wasPlaying = state.isPlaying
-        let oldUID = currentDeviceUID
-
-        guard let deviceID = AudioDeviceManager.deviceID(forUID: uid) else {
-            throw PlaybackEngineError.deviceNotFound(uid: uid)
-        }
-
-        if engine == nil {
-            setupEngine()
-        }
-
-        guard let engine = engine else {
-            throw PlaybackEngineError.engineSetupFailed
-        }
-
-        let audioUnit = engine.outputNode.audioUnit!
-        var devID = deviceID
-        let status = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &devID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-
-        guard status == noErr else {
-            throw PlaybackEngineError.deviceUnavailable(uid: uid)
-        }
-
-        currentDeviceUID = uid
-
-        let hotSwapped = wasPlaying && oldUID != nil && oldUID != uid
-        if hotSwapped {
-            do {
-                try engine.start()
-                playerNode?.play()
-            } catch {
-                transition(to: .error(message: "Failed to restart after device swap: \(error.localizedDescription)"))
-                throw PlaybackEngineError.engineSetupFailed
-            }
-        }
-
-        Log.output.info("Output device set to \(uid, privacy: .public), hot_swapped=\(hotSwapped)")
-        return hotSwapped
+    /// Point the engine at a discovered AirPlay device. Pass nil to clear.
+    func setDevice(_ device: AirPlayDevice?) async {
+        await session.setDevice(device)
     }
 
-    var outputDeviceUID: String? { currentDeviceUID }
+    var currentDevice: AirPlayDevice? {
+        get async { await session.currentDevice }
+    }
+
+    /// Legacy hook kept for API compatibility with earlier UID-based callers;
+    /// a no-op in the AirPlay architecture because routing is by Bonjour device,
+    /// not CoreAudio UID.
+    func setOutputDevice(uid: String) async throws -> Bool { false }
+    var outputDeviceUID: String? { nil }
 
     // MARK: - Playback
 
     func play(track: QueueTrack) async throws {
-        stopInternal()
-        setupEngine()
-
-        guard let engine = engine, let playerNode = playerNode else {
-            transition(to: .error(message: "Audio engine setup failed"))
-            throw PlaybackEngineError.engineSetupFailed
-        }
-
-        // Pin to saved device if set
-        if let uid = currentDeviceUID, let deviceID = AudioDeviceManager.deviceID(forUID: uid) {
-            let audioUnit = engine.outputNode.audioUnit!
-            var devID = deviceID
-            AudioUnitSetProperty(
-                audioUnit,
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                &devID,
-                UInt32(MemoryLayout<AudioDeviceID>.size)
-            )
-        }
-
+        let url = URL(fileURLWithPath: track.stagedPath)
         do {
-            let file = try AVAudioFile(forReading: URL(fileURLWithPath: track.stagedPath))
-            self.audioFile = file
-
-            engine.connect(playerNode, to: engine.mainMixerNode, format: file.processingFormat)
-
-            try engine.start()
-
-            playerNode.scheduleFile(file, at: nil) { [weak self] in
-                guard let self else { return }
-                Task {
-                    await self.handlePlaybackFinished()
-                }
-            }
-            playerNode.play()
-
+            try await session.play(fileURL: url)
             transition(to: .playing(file: track.originalFilename))
-            Log.playback.info("Playing: \(track.originalFilename, privacy: .public)")
+            Log.playback.info("Playing \(track.originalFilename, privacy: .public)")
+        } catch let error as AirPlayError {
+            let msg = error.description
+            transition(to: .error(message: msg))
+            Log.playback.error("Playback refused: \(msg, privacy: .public)")
+            throw error
         } catch {
             transition(to: .error(message: "Playback failed: \(error.localizedDescription)"))
             throw error
         }
     }
 
-    func stop() -> PlaybackState {
-        stopInternal()
+    func stop() async -> PlaybackState {
+        await session.stop()
         transition(to: .idle)
         return state
     }
 
     func pause() -> PlaybackState {
-        guard case .playing(let file) = state else { return state }
-        playerNode?.pause()
-        engine?.pause()
-        transition(to: .paused(file: file))
+        // Pause semantics depend on the RTP streamer (Phase 5). For now, a pause
+        // call while no real stream is running just transitions state.
+        if case .playing(let file) = state {
+            transition(to: .paused(file: file))
+        }
         return state
     }
 
     func resume() -> PlaybackState {
-        guard case .paused = state, let engine = engine, let playerNode = playerNode else { return state }
-        do {
-            try engine.start()
-            playerNode.play()
-            if case .paused(let file) = state {
-                transition(to: .playing(file: file))
-            }
-        } catch {
-            transition(to: .error(message: "Resume failed: \(error.localizedDescription)"))
+        if case .paused(let file) = state {
+            transition(to: .playing(file: file))
         }
         return state
     }
 
     // MARK: - Private
-
-    private func setupEngine() {
-        let eng = AVAudioEngine()
-        let node = AVAudioPlayerNode()
-        eng.attach(node)
-        self.engine = eng
-        self.playerNode = node
-    }
-
-    private func stopInternal() {
-        playerNode?.stop()
-        engine?.stop()
-        engine?.reset()
-        playerNode = nil
-        engine = nil
-        audioFile = nil
-    }
-
-    private func handlePlaybackFinished() {
-        guard state.isPlaying else { return }
-        transition(to: .idle)
-        Log.playback.info("Track finished")
-
-        if let cb = trackFinishedCallback {
-            Task { await cb() }
-        }
-    }
 
     private func transition(to newState: PlaybackState) {
         let oldState = state
@@ -192,4 +98,5 @@ enum PlaybackEngineError: Error, Sendable {
     case deviceNotFound(uid: String)
     case deviceUnavailable(uid: String)
     case engineSetupFailed
+    case noAirPlayRoute
 }
