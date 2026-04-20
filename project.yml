@@ -22,6 +22,16 @@ packages:
     url: https://github.com/adam-fowler/swift-srp.git
     from: "2.2.0"
 
+schemes:
+  AirBridge:
+    build:
+      targets:
+        AirBridge: all
+        AirBridgeTests: [test]
+    test:
+      targets:
+        - AirBridgeTests
+
 targets:
   AirBridge:
     type: application
@@ -53,6 +63,9 @@ targets:
     platform: macOS
     sources:
       - Tests/AirBridgeTests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
     dependencies:
       - target: AirBridge
       - package: Hummingbird
