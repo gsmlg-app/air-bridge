@@ -1,6 +1,4 @@
 .build/
-.swiftpm/
-Package.resolved
 *.xcodeproj/
 xcuserdata/
 DerivedData/

@@ -3,8 +3,8 @@ import os
 
 enum FileStaging {
     static var directory: URL {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".airbridge")
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("AirBridge")
             .appendingPathComponent("queue")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
