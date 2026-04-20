@@ -9,15 +9,23 @@ AirBridge is a macOS menu bar audio relay app. It receives audio files via multi
 ## Build & Test
 
 ```bash
-swift build                              # debug build
-swift build -c release                   # release build
-swift test                               # run all tests
-swift test --filter PlaybackState        # run tests matching a name
-swift test --filter AudioValidator       # run tests matching a name
-swift test --filter APIRoutes            # run API route tests (uses HummingbirdTesting)
-swift test --filter PlaybackQueue        # run queue actor tests
-swift test --filter FileStaging          # run file staging tests
-.build/debug/AirBridge                   # run the app
+# Install XcodeGen (one-time)
+brew install xcodegen
+
+# Generate Xcode project (run after any project.yml change)
+xcodegen generate
+
+# Build (command line)
+xcodebuild -project AirBridge.xcodeproj -scheme AirBridge -configuration Debug build
+
+# Build in Xcode
+open AirBridge.xcodeproj
+
+# Run tests (via SPM — Xcode test target has NIO linking issues)
+swift test
+
+# Run tests matching a name
+swift test --filter PlaybackState
 ```
 
 Manual API testing:
