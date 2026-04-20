@@ -40,8 +40,8 @@ curl -X POST http://127.0.0.1:9876/stop
 # List output devices
 curl http://127.0.0.1:9876/outputs
 
-# Set output device
-curl -X PUT http://127.0.0.1:9876/outputs/current -H "Content-Type: application/json" -d '{"id":"DEVICE-UID"}'
+# Set output device (use Bonjour ID from /outputs)
+curl -X PUT http://127.0.0.1:9876/outputs/current -H "Content-Type: application/json" -d '{"id":"BONJOUR-ID"}'
 
 # Queue navigation
 curl -X POST http://127.0.0.1:9876/queue/next
@@ -54,32 +54,37 @@ curl -X POST http://127.0.0.1:9876/resume
 
 ## Architecture
 
-**Data flow:** HTTP multipart upload → `APIRoutes` → `MultipartFileParser` → `FileStaging` (disk) → `PlaybackQueue` (actor) → `PlaybackEngine` (actor, AVAudioEngine) → CoreAudio output device. State changes flow back via callback: `PlaybackEngine` → `AppState` (@MainActor ObservableObject) → `MenuBarView` (SwiftUI).
+**Data flow:** HTTP multipart upload → `APIRoutes` → `MultipartFileParser` → `FileStaging` (disk) → `PlaybackQueue` (actor) → `PlaybackEngine` (actor) → `AirPlaySession` (actor) → AirPlay device. State changes flow back via callback: `PlaybackEngine` → `AppState` (@MainActor ObservableObject) → `MenuBarView` (SwiftUI).
+
+**Source layout:** `Sources/AirBridge/` is organized into five directories: `App/` (entry point, AppState), `AirPlay/` (protocol stack, Bonjour discovery, HAP pairing), `MenuBar/` (SwiftUI views), `Playback/` (engine, queue, state, validators), `Transport/` (HTTP server, API routes, multipart parser), `Util/` (logging, file staging).
 
 **Key types:**
-- `PlaybackEngine` (actor) — owns AVAudioEngine + AVAudioPlayerNode. Pins output to a specific device via `kAudioOutputUnitProperty_CurrentDevice`. Supports hot-swap during playback.
-- `PlaybackQueue` (actor) — ordered track list with auto-advance on track completion. Coordinates with PlaybackEngine for playback.
-- `AppState` (@MainActor) — bridges actors to SwiftUI via @Published properties. Owns HTTP server lifecycle, queue state sync, and output device observer.
+- `PlaybackEngine` (actor) — wraps `AirPlaySession` for playback. Delegates device selection and audio streaming to the session actor.
+- `AirPlaySession` (actor) — manages connection to an AirPlay device, including HAP transient pairing (Phase 2). Resolves Bonjour endpoints via attached `BonjourDiscovery`.
+- `BonjourDiscovery` (actor) — browses `_airplay._tcp` and `_raop._tcp` services. Publishes device updates as an `AsyncStream<[AirPlayDevice]>`.
+- `AirPlayDevice` — Codable struct parsed from Bonjour TXT records; includes feature bitmask, model ID, AirPlay 2 support flag.
+- `PlaybackQueue` (actor) — ordered track list with auto-advance on track completion.
+- `AppState` (@MainActor) — bridges actors to SwiftUI via @Published properties. Owns HTTP server lifecycle, Bonjour discovery consumption, queue state sync.
 - `PlaybackState` (enum) — `.idle | .playing(file) | .paused(file) | .error(message)`.
 - `QueueTrack` / `QueueState` — track metadata and queue state with current index.
-- `AudioDeviceManager` — read-only CoreAudio device enumeration using stable UIDs. Never modifies system default.
-- `OutputDeviceObserver` — CoreAudio property listener for system default output changes.
+- `HAPPairing` / `HAPTLV8` — HAP transient pairing protocol and TLV8 encoding for AirPlay 2 authentication.
 - `MultipartFileParser` — extracts files from multipart/form-data uploads using MultipartKit.
 - `FileStaging` — manages `~/.airbridge/queue/` directory for uploaded files.
 - `AudioValidator` — validates file extensions and paths.
 
-**HTTP layer:** Routes are defined in `APIRoutes.swift` (`buildRouter`). File uploads via multipart/form-data. All routes manually encode JSON responses via a `jsonResponse` helper. `buildTestApplication` creates a port-0 app for HummingbirdTesting.
+**HTTP layer:** Routes are defined in `APIRoutes.swift` (`buildRouter`). File uploads via multipart/form-data. All routes manually encode JSON responses via a `jsonResponse` helper. `buildTestApplication` creates a port-0 app for HummingbirdTesting. Auth middleware gates all routes when a bearer token is configured.
 
 ## Key Constraints
 
 - Audio plays on AirBridge's own pinned output device — system default is never modified
 - HTTP server binds to `127.0.0.1` by default; LAN binding requires explicit `listenAddress` change + auth token
-- Cannot programmatically select HomePod — user must pick via AVRoutePickerView to register it with CoreAudio, then AirBridge can target it via API
+- HomePods are discovered via Bonjour (`_airplay._tcp` / `_raop._tcp`); user must first trigger AVRoutePickerView so CoreAudio registers them, then AirBridge can target them via API
 - Queue with auto-advance; `/play` inserts at current+1 and skips to it
 - Supported formats: mp3, wav, m4a, aiff
 - Upload size cap: 50 MB per file
 - Uploaded files staged to `~/.airbridge/queue/`, cleaned up on remove/stop/quit
-- Device identification uses stable UIDs (not boot-transient AudioDeviceID)
+- Device identification uses Bonjour service IDs (stable across reboots)
+- AirPlay 2 protocol integration is phased: Phase 1 (Bonjour discovery + session skeleton) is complete; Phases 2–5 (HAP pairing, RTSP negotiation, audio streaming) are in progress
 - Minimum macOS 14 (Sonoma) — uses MenuBarExtra with `.window` style
 - `LSUIElement = true` — no Dock icon, menu bar only
 - Logging via `os.Logger` with subsystem `com.gsmlg.airbridge` (categories: http, playback, server, queue, output)

@@ -1,8 +1,8 @@
 # AirBridge
 
-A macOS menu bar app that receives audio files via a local HTTP API, queues them, and plays them through a pinned AirPlay / HomePod output using AVAudioEngine.
+A macOS menu bar app that receives audio files via a local HTTP API, queues them, and plays them through a selected AirPlay / HomePod output.
 
-AirBridge is a relay bridge between [OpenClaw](https://github.com/gsmlg-app/openclaw) (running on NixOS/Linux) and Apple HomePod — upload an audio file over multipart HTTP, and AirBridge queues and plays it through the HomePod you picked in Settings. The app's engine is pinned to its own output device, so playback never hijacks the system default.
+AirBridge is a relay bridge between [OpenClaw](https://github.com/gsmlg-app/openclaw) (running on NixOS/Linux) and Apple HomePod — upload an audio file over multipart HTTP, and AirBridge queues and plays it through the AirPlay device you picked in Settings. Devices are discovered via Bonjour and targeted by stable service IDs.
 
 ## Requirements
 
@@ -22,7 +22,7 @@ The app appears as a menu bar icon (AirPlay audio symbol); it has no Dock icon (
 
 Open via the **Settings…** button in the menu bar popover.
 
-- **AirPlay Output** — checkbox group of discovered AirPlay / HomePod devices; tick one to pin the engine to it. Use the built-in AirPlay button to discover HomePods first.
+- **AirPlay Output** — list of AirPlay / HomePod devices discovered via Bonjour (`_airplay._tcp` / `_raop._tcp`); select one to target the engine. Use the built-in AirPlay route button to register HomePods with CoreAudio first.
 - **Server** — listen address (default `127.0.0.1`) and port (default `9876`).
 - **Authentication** — optional bearer token; leave empty to disable. Includes a **Generate** button that produces a 32-character URL-safe random token.
 - **Restart Server** — applies address / port / token changes without quitting the app.
@@ -56,9 +56,9 @@ All endpoints default to `127.0.0.1:9876`. If an auth token is set, include `Aut
 
 | Method & Path | Description |
 |---|---|
-| `GET /outputs` | List CoreAudio output devices |
-| `GET /outputs/current` | Engine's pinned device |
-| `PUT /outputs/current` | Set engine target (`{"id": "DEVICE-UID"}`) |
+| `GET /outputs` | List discovered AirPlay devices |
+| `GET /outputs/current` | Currently selected AirPlay device |
+| `PUT /outputs/current` | Select AirPlay device by Bonjour ID (`{"id": "BONJOUR-ID"}`) |
 
 ### Examples
 
@@ -72,17 +72,17 @@ curl -X POST http://127.0.0.1:9876/play -F "file=@/path/to/alert.mp3"
 # Status
 curl http://127.0.0.1:9876/status
 
-# Pin to a HomePod (get UIDs from /outputs)
+# Pin to a HomePod (get Bonjour IDs from /outputs)
 curl -X PUT http://127.0.0.1:9876/outputs/current \
   -H "Content-Type: application/json" \
-  -d '{"id":"HomePod-XXXX-UID"}'
+  -d '{"id":"BONJOUR-SERVICE-ID"}'
 ```
 
 Supported formats: `mp3`, `wav`, `m4a`, `aiff`. Upload cap: 50 MB per file. Uploaded files are staged to `~/.airbridge/queue/` and cleaned up on remove / stop / quit.
 
 ## AirPlay Setup
 
-AirBridge cannot programmatically discover HomePods — you must first trigger Apple's AirPlay picker once so CoreAudio registers them. In **Settings → AirPlay Output**, click the built-in AirPlay route button, pick your HomePod, then tick it in the checkbox list to pin the engine.
+AirBridge discovers AirPlay devices via Bonjour (`_airplay._tcp` and `_raop._tcp`). For HomePods, you must first trigger Apple's AirPlay picker once so CoreAudio registers them. In **Settings → AirPlay Output**, click the built-in AirPlay route button, pick your HomePod, then select it in the device list.
 
 ## Architecture
 
@@ -91,27 +91,34 @@ HTTP multipart upload
   → APIRoutes (Hummingbird 2.x router)
   → MultipartFileParser → FileStaging (~/.airbridge/queue/)
   → PlaybackQueue (actor)
-  → PlaybackEngine (actor, AVAudioEngine)
-  → pinned CoreAudio output device
+  → PlaybackEngine (actor)
+  → AirPlaySession (actor, HAP pairing)
+  → AirPlay device (HomePod / Apple TV / etc.)
                         │
                         ▼ state callback
                    AppState (@MainActor)
                         │
                         ▼
                    MenuBarView / SettingsView (SwiftUI)
+
+BonjourDiscovery (actor)
+  → browses _airplay._tcp / _raop._tcp
+  → AsyncStream<[AirPlayDevice]> → AppState → SettingsView
 ```
 
-- **PlaybackEngine** — Swift actor owning AVAudioEngine + AVAudioPlayerNode. Pins output via `kAudioOutputUnitProperty_CurrentDevice`; supports hot-swap during playback.
+- **PlaybackEngine** — Swift actor wrapping `AirPlaySession`; delegates playback and device selection to the session.
+- **AirPlaySession** — actor managing AirPlay device connection, including HAP transient pairing for AirPlay 2 devices.
+- **BonjourDiscovery** — actor browsing Bonjour for AirPlay devices; publishes updates as an async stream.
 - **PlaybackQueue** — actor managing ordered tracks with auto-advance.
-- **AppState** — `@MainActor ObservableObject`; owns server lifecycle (`startServer` / `stopServer` / `restartServer`), queue sync, and the output-device observer.
-- **AudioDeviceManager** — read-only CoreAudio device enumeration using stable UIDs. Never modifies system default.
+- **AppState** — `@MainActor ObservableObject`; owns server lifecycle, Bonjour discovery consumption, queue sync.
 - **Hummingbird 2.x** — async HTTP server; test harness via `HummingbirdTesting` with port-0 apps.
 
 ### Key constraints
 
-- Audio plays on AirBridge's own pinned output — the system default is never changed.
+- Audio plays on the selected AirPlay device — the system default is never changed.
 - Server binds to `127.0.0.1` by default; LAN binding requires changing the listen address *and* setting an auth token.
-- Device identification uses stable UIDs, not boot-transient `AudioDeviceID`s.
+- Device identification uses stable Bonjour service IDs.
+- AirPlay 2 protocol integration is phased: Phase 1 (Bonjour discovery + session skeleton) is complete.
 - Logging via `os.Logger`, subsystem `com.gsmlg.airbridge` (categories: `http`, `playback`, `server`, `queue`, `output`).
 
 ## Tests
