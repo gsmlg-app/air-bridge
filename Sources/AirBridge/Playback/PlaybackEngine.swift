@@ -172,9 +172,10 @@ actor PlaybackEngine {
     func play(track: QueueTrack) async throws {
         let url = URL(fileURLWithPath: track.stagedPath)
         var errors: [String: Error] = [:]
+        let attemptedIDs = order
 
         await withTaskGroup(of: (String, Error?).self) { group in
-            for id in order {
+            for id in attemptedIDs {
                 guard let session = sessions[id] else { continue }
                 group.addTask {
                     do { try await session.play(fileURL: url); return (id, nil) }
@@ -184,8 +185,11 @@ actor PlaybackEngine {
             for await (id, err) in group { if let err = err { errors[id] = err } }
         }
 
-        if errors.count == order.count, !order.isEmpty {
-            let first = errors.first!
+        // Prevent state overwrite if stop() was called during suspension
+        guard !Task.isCancelled else { return }
+        guard case .idle = state else { return }
+
+        if let first = errors.first, errors.count == attemptedIDs.count, !attemptedIDs.isEmpty {
             let msg = "All devices failed; first=\(first.key): \(first.value.localizedDescription)"
             transition(to: .error(message: msg))
             throw first.value
@@ -196,8 +200,13 @@ actor PlaybackEngine {
     }
 
     func stop() async -> PlaybackState {
-        for id in order {
-            await sessions[id]?.stop()
+        let sessionsToStop = order.compactMap { sessions[$0] }
+        await withTaskGroup(of: Void.self) { group in
+            for session in sessionsToStop {
+                group.addTask {
+                    await session.stop()
+                }
+            }
         }
         transition(to: .idle)
         return state
