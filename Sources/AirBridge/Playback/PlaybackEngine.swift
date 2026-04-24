@@ -65,8 +65,65 @@ actor PlaybackEngine {
         }
     }
 
-    func setSelectedDevices(_ devices: [AirPlayDevice]) async {
-        // implemented in next task
+    func setSelectedDevices(_ requested: [AirPlayDevice]) async {
+        let requestedIDs = requested.map { $0.id }
+        let currentIDs = Set(order)
+        let reqSet = Set(requestedIDs)
+
+        let toRemove = currentIDs.subtracting(reqSet)
+        for id in toRemove {
+            await sessions[id]?.stop()
+            sessions.removeValue(forKey: id)
+            statuses.removeValue(forKey: id)
+            deviceSnapshots.removeValue(forKey: id)
+        }
+
+        let toAdd = reqSet.subtracting(currentIDs)
+        for d in requested where toAdd.contains(d.id) {
+            let session = sessionFactory()
+            if let discovery { await session.attachDiscovery(discovery) }
+            await session.setDevice(d)
+
+            sessions[d.id] = session
+            deviceSnapshots[d.id] = d
+            statuses[d.id] = .pairing
+
+            if !d.supportsAirPlay2 {
+                statuses[d.id] = .error(reason: "AirPlay 2 required")
+                continue
+            }
+
+            Task { [weak self, id = d.id] in
+                do {
+                    try await session.connect()
+                    await self?.updateStatus(id: id, status: .ok)
+                } catch {
+                    await self?.updateStatus(id: id, status: .error(reason: error.localizedDescription))
+                }
+            }
+        }
+
+        order = requestedIDs
+        // update displayNames for existing devices in case of rename
+        for d in requested {
+            if deviceSnapshots[d.id] != nil {
+                deviceSnapshots[d.id] = d
+            }
+        }
+
+        fireStatusCallback()
+    }
+
+    private func updateStatus(id: String, status: DeviceStatus) {
+        if statuses[id] != nil {
+            statuses[id] = status
+            fireStatusCallback()
+        }
+    }
+
+    private func fireStatusCallback() {
+        let snap = selectedDevices()
+        statusCallback?(snap)
     }
 
     /// Legacy hook kept for API compatibility with earlier UID-based callers;
