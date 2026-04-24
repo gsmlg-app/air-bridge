@@ -42,7 +42,7 @@ final class AppState: ObservableObject {
         // Start Bonjour discovery and consume updates. Also hand the discovery
         // actor to the playback session so it can resolve endpoints at connect time.
         Task { [engine, discovery] in
-            await engine.session.attachDiscovery(discovery)
+            await engine.attachDiscovery(discovery)
             await discovery.start()
         }
         discoveryTask = Task { [weak self] in

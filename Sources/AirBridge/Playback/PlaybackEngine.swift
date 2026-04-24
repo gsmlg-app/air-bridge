@@ -8,12 +8,31 @@ import os
 actor PlaybackEngine {
     private(set) var state: PlaybackState = .idle
 
-    let session: AirPlaySession
+    private var sessions: [String: AirPlaySession] = [:]
+    private var order: [String] = []
+    private var deviceSnapshots: [String: AirPlayDevice] = [:]
+    private var statuses: [String: DeviceStatus] = [:]
+    private weak var discovery: BonjourDiscovery?
+
+    private var statusCallback: (@Sendable ([SelectedDevice]) -> Void)?
     private var stateCallback: (@Sendable (PlaybackState) -> Void)?
     private var trackFinishedCallback: (@Sendable () async -> Void)?
 
-    init(session: AirPlaySession = AirPlaySession()) {
-        self.session = session
+    var sessionFactory: @Sendable () -> AirPlaySession = { AirPlaySession() }
+
+    init() {
+        // no longer initializes a single session
+    }
+
+    func setStatusCallback(_ callback: @escaping @Sendable ([SelectedDevice]) -> Void) {
+        self.statusCallback = callback
+    }
+
+    func selectedDevices() -> [SelectedDevice] {
+        return order.compactMap { id in
+            guard let snap = deviceSnapshots[id], let stat = statuses[id] else { return nil }
+            return SelectedDevice(id: id, displayName: snap.displayName, status: stat)
+        }
     }
 
     func setStateCallback(_ callback: @escaping @Sendable (PlaybackState) -> Void) {
@@ -24,15 +43,30 @@ actor PlaybackEngine {
         self.trackFinishedCallback = callback
     }
 
+    func attachDiscovery(_ d: BonjourDiscovery) {
+        self.discovery = d
+    }
+
     // MARK: - Device selection
 
     /// Point the engine at a discovered AirPlay device. Pass nil to clear.
     func setDevice(_ device: AirPlayDevice?) async {
-        await session.setDevice(device)
+        if let d = device {
+            await setSelectedDevices([d])
+        } else {
+            await setSelectedDevices([])
+        }
     }
 
     var currentDevice: AirPlayDevice? {
-        get async { await session.currentDevice }
+        get async {
+            guard let firstID = order.first else { return nil }
+            return deviceSnapshots[firstID]
+        }
+    }
+
+    func setSelectedDevices(_ devices: [AirPlayDevice]) async {
+        // implemented in next task
     }
 
     /// Legacy hook kept for API compatibility with earlier UID-based callers;
@@ -44,24 +78,14 @@ actor PlaybackEngine {
     // MARK: - Playback
 
     func play(track: QueueTrack) async throws {
-        let url = URL(fileURLWithPath: track.stagedPath)
-        do {
-            try await session.play(fileURL: url)
-            transition(to: .playing(file: track.originalFilename))
-            Log.playback.info("Playing \(track.originalFilename, privacy: .public)")
-        } catch let error as AirPlayError {
-            let msg = error.description
-            transition(to: .error(message: msg))
-            Log.playback.error("Playback refused: \(msg, privacy: .public)")
-            throw error
-        } catch {
-            transition(to: .error(message: "Playback failed: \(error.localizedDescription)"))
-            throw error
-        }
+        // TODO: Update in next task
+        let _ = URL(fileURLWithPath: track.stagedPath)
+        transition(to: .playing(file: track.originalFilename))
+        Log.playback.info("Playing \(track.originalFilename, privacy: .public)")
     }
 
     func stop() async -> PlaybackState {
-        await session.stop()
+        // TODO: Update in next task
         transition(to: .idle)
         return state
     }
