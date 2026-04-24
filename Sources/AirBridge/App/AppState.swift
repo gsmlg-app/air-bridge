@@ -8,7 +8,7 @@ final class AppState: ObservableObject {
     @Published var playbackState: PlaybackState = .idle
     @Published var queueState: QueueState = QueueState()
     @Published var airplayDevices: [AirPlayDevice] = []
-    @Published var selectedDevice: AirPlayDevice?
+    @Published var selectedDevices: [SelectedDevice] = []
 
     @Published var listenAddress: String
     @Published var serverPort: Int
@@ -30,6 +30,15 @@ final class AppState: ObservableObject {
 
         self.queue = PlaybackQueue(engine: engine)
 
+        // Status callback from playback engine (multi-device) → SwiftUI
+        Task {
+            await engine.setStatusCallback { [weak self] devices in
+                Task { @MainActor in
+                    self?.selectedDevices = devices
+                }
+            }
+        }
+
         // State callback from playback engine → SwiftUI
         Task {
             await engine.setStateCallback { [weak self] newState in
@@ -45,16 +54,23 @@ final class AppState: ObservableObject {
             await engine.attachDiscovery(discovery)
             await discovery.start()
         }
+
         discoveryTask = Task { [weak self] in
             guard let self else { return }
             let stream = await self.discovery.updates()
             for await devices in stream {
                 await MainActor.run {
                     self.airplayDevices = devices
-                    // Re-apply any previously selected device if it reappears.
-                    if let id = self.selectedDevice?.id,
-                       let match = devices.first(where: { $0.id == id }) {
-                        self.selectedDevice = match
+                }
+
+                // Handle offline/retry
+                let currentSelected = await self.engine.selectedDevices()
+                for sel in currentSelected {
+                    let inBonjour = devices.contains(where: { $0.id == sel.id })
+                    if !inBonjour && sel.status != .offline {
+                        await self.engine.markOffline(deviceID: sel.id)
+                    } else if inBonjour && sel.status == .offline {
+                        await self.engine.retry(deviceID: sel.id)
                     }
                 }
             }
@@ -69,29 +85,80 @@ final class AppState: ObservableObject {
             }
         }
 
-        // Restore previously-saved selected device ID (match against current
-        // discovery once it populates).
-        let savedID = UserDefaults.standard.string(forKey: "selectedAirPlayDeviceID") ?? ""
-        if !savedID.isEmpty {
+        // Restore previously-saved devices
+        let savedIDs: [String]
+        if let data = UserDefaults.standard.data(forKey: "selectedAirPlayDeviceIDs"),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            savedIDs = decoded
+        } else if let legacyID = UserDefaults.standard.string(forKey: "selectedAirPlayDeviceID"), !legacyID.isEmpty {
+            savedIDs = [legacyID]
+            let data = try? JSONEncoder().encode(savedIDs)
+            UserDefaults.standard.set(data, forKey: "selectedAirPlayDeviceIDs")
+            UserDefaults.standard.removeObject(forKey: "selectedAirPlayDeviceID")
+        } else {
+            savedIDs = []
+        }
+
+        if !savedIDs.isEmpty {
             Task { [weak self] in
                 guard let self else { return }
-                // Wait a moment for discovery to populate.
+                // Seed offline devices immediately so UI shows them
+                let offlineDevices = savedIDs.map { id in
+                    AirPlayDevice(id: id, displayName: id, serviceType: "_airplay._tcp.", txt: [:])
+                }
+                await self.engine.setSelectedDevices(offlineDevices)
+                for id in savedIDs {
+                    await self.engine.markOffline(deviceID: id)
+                }
+
                 try? await Task.sleep(for: .seconds(2))
                 let devices = await MainActor.run { self.airplayDevices }
-                if let device = devices.first(where: { $0.id == savedID }) {
-                    await self.selectAirPlayDevice(device)
+                let toSelect = savedIDs.compactMap { id in devices.first(where: { $0.id == id }) }
+                if !toSelect.isEmpty {
+                    await self.engine.setSelectedDevices(toSelect)
                 }
             }
         }
 
         startServer()
     }
+    /// Replaces the entire selection based on HTTP API requests.
+    func setSelectedDevices(_ ids: [String]) async {
+        let devices = await MainActor.run { self.airplayDevices }
+        var resolved: [AirPlayDevice] = []
+        for id in ids {
+            if let d = devices.first(where: { $0.id == id }) {
+                resolved.append(d)
+            } else {
+                // Unknown to Bonjour right now, construct a stub to track offline
+                resolved.append(AirPlayDevice(id: id, displayName: id, serviceType: "_airplay._tcp.", txt: [:]))
+            }
+        }
+        if let data = try? JSONEncoder().encode(ids) {
+            UserDefaults.standard.set(data, forKey: "selectedAirPlayDeviceIDs")
+        }
+        await engine.setSelectedDevices(resolved)
 
-    /// Set the active AirPlay target; passing nil clears selection.
-    func selectAirPlayDevice(_ device: AirPlayDevice?) async {
-        self.selectedDevice = device
-        UserDefaults.standard.set(device?.id ?? "", forKey: "selectedAirPlayDeviceID")
-        await engine.setDevice(device)
+        // Mark unknown ones offline immediately
+        for id in ids {
+            if !devices.contains(where: { $0.id == id }) {
+                await engine.markOffline(deviceID: id)
+            }
+        }
+    }
+
+    /// Toggles a single device for the Settings UI checkboxes.
+    func toggleSelection(_ device: AirPlayDevice) async {
+        let currentIDs = await engine.selectedDevices().map(\.id)
+        var newIDs = currentIDs
+        if let idx = newIDs.firstIndex(of: device.id) {
+            newIDs.remove(at: idx)
+        } else {
+            if newIDs.count < 8 {
+                newIDs.append(device.id)
+            }
+        }
+        await setSelectedDevices(newIDs)
     }
 }
 

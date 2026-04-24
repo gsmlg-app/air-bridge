@@ -43,11 +43,26 @@ func buildRouter(
     router.get("status") { _, _ -> Response in
         let engineState = await engine.state
         let queueState = await queue.list()
-        let selected = await engine.currentDevice
+        let selectedSnapshots = await engine.selectedDevices()
 
         let track: StatusResponse.TrackRef? = queueState.currentTrack.map {
             .init(id: $0.id.uuidString, filename: $0.originalFilename)
         }
+
+        let outputsInfo = selectedSnapshots.map { s -> SelectedDeviceInfo in
+            let reason: String? = { if case .error(let r) = s.status { return r }; return nil }()
+            let statusStr: String = {
+                switch s.status {
+                case .pairing: return "pairing"
+                case .ok: return "ok"
+                case .offline: return "offline"
+                case .error: return "error"
+                }
+            }()
+            return SelectedDeviceInfo(id: s.id, name: s.displayName, status: statusStr, status_reason: reason, online: s.status != .offline)
+        }
+
+        let first = selectedSnapshots.first
 
         let resp = StatusResponse(
             status: engineState.statusString,
@@ -55,9 +70,10 @@ func buildRouter(
             queue_length: queueState.tracks.count,
             queue_position: queueState.currentIndex,
             output: StatusResponse.OutputInfo(
-                airplay_device_id: selected?.id,
-                airplay_device_name: selected?.displayName
+                airplay_device_id: first?.id,
+                airplay_device_name: first?.displayName
             ),
+            outputs: outputsInfo,
             error: engineState.errorMessage
         )
         return try jsonResponse(resp)
@@ -253,37 +269,125 @@ func buildRouter(
         return try jsonResponse(["status": "idle"])
     }
 
-    // GET /outputs — list discovered AirPlay devices
+    // GET /outputs
     router.get("outputs") { _, _ -> Response in
         let devices = await discovery?.devices ?? []
-        let selectedID = await engine.currentDevice?.id
-        let infos = devices.map { d in
-            AirPlayDeviceInfo(
+        let selectedSnapshots = await engine.selectedDevices()
+        let selectedIDs = selectedSnapshots.map(\.id)
+
+        let infos = devices.map { d -> AirPlayDeviceInfo in
+            let order = selectedIDs.firstIndex(of: d.id)
+            return AirPlayDeviceInfo(
                 id: d.id,
                 name: d.displayName,
                 model: d.modelID,
                 supports_airplay_2: d.supportsAirPlay2,
                 requires_pairing: d.requiresPairing,
-                is_selected: d.id == selectedID
+                is_selected: order != nil,
+                selected_order: order
             )
         }
-        let selected = infos.first { $0.is_selected }
-        return try jsonResponse(OutputsResponse(selected: selected, devices: infos))
+
+        let outputsInfo = selectedSnapshots.map { s -> SelectedDeviceInfo in
+            let reason: String? = { if case .error(let r) = s.status { return r }; return nil }()
+            let statusStr: String = {
+                switch s.status {
+                case .pairing: return "pairing"
+                case .ok: return "ok"
+                case .offline: return "offline"
+                case .error: return "error"
+                }
+            }()
+            return SelectedDeviceInfo(id: s.id, name: s.displayName, status: statusStr, status_reason: reason, online: s.status != .offline)
+        }
+
+        let firstSelected = infos.first { $0.is_selected && $0.selected_order == 0 }
+
+        return try jsonResponse(OutputsResponse(selected: firstSelected, selected_devices: outputsInfo, devices: infos))
+    }
+
+    // GET /outputs/selected
+    router.get("outputs/selected") { _, _ -> Response in
+        let selectedSnapshots = await engine.selectedDevices()
+        let outputsInfo = selectedSnapshots.map { s -> SelectedDeviceInfo in
+            let reason: String? = { if case .error(let r) = s.status { return r }; return nil }()
+            let statusStr: String = {
+                switch s.status {
+                case .pairing: return "pairing"
+                case .ok: return "ok"
+                case .offline: return "offline"
+                case .error: return "error"
+                }
+            }()
+            return SelectedDeviceInfo(id: s.id, name: s.displayName, status: statusStr, status_reason: reason, online: s.status != .offline)
+        }
+        return try jsonResponse(SelectedOutputsResponse(max: 8, devices: outputsInfo))
+    }
+
+    // PUT /outputs/selected
+    router.put("outputs/selected") { request, context -> Response in
+        guard let body = try? await request.decode(as: PutSelectedRequest.self, context: context) else {
+            return try jsonResponse(ErrorResponse(error: "invalid_request", message: "Missing 'ids' array"), status: .badRequest)
+        }
+
+        if body.ids.count > 8 {
+            return try jsonResponse(ErrorResponse(error: "too_many_devices", message: "max 8 devices"), status: .badRequest)
+        }
+
+        var seen = Set<String>()
+        for id in body.ids {
+            if seen.contains(id) {
+                return try jsonResponse(ErrorResponse(error: "duplicate_ids", message: "id '\(id)' appears twice"), status: .badRequest)
+            }
+            seen.insert(id)
+            let devices = await discovery?.devices ?? []
+            if !devices.contains(where: { $0.id == id }) {
+                return try jsonResponse(ErrorResponse(error: "device_not_found", message: "No AirPlay device with id: \(id)"), status: .notFound)
+            }
+        }
+
+        if let appState = appState {
+            await appState.setSelectedDevices(body.ids)
+        } else {
+            // For tests
+            let devices = await discovery?.devices ?? []
+            let toSelect = body.ids.compactMap { id in devices.first(where: { $0.id == id }) }
+            await engine.setSelectedDevices(toSelect)
+        }
+
+        let selectedSnapshots = await engine.selectedDevices()
+        let outputsInfo = selectedSnapshots.map { s -> SelectedDeviceInfo in
+            let reason: String? = { if case .error(let r) = s.status { return r }; return nil }()
+            let statusStr: String = {
+                switch s.status {
+                case .pairing: return "pairing"
+                case .ok: return "ok"
+                case .offline: return "offline"
+                case .error: return "error"
+                }
+            }()
+            return SelectedDeviceInfo(id: s.id, name: s.displayName, status: statusStr, status_reason: reason, online: s.status != .offline)
+        }
+        return try jsonResponse(SelectedOutputsResponse(max: 8, devices: outputsInfo))
     }
 
     // GET /outputs/current — currently-selected AirPlay device
     router.get("outputs/current") { _, _ -> Response in
-        guard let device = await engine.currentDevice else {
-            return try jsonResponse(
-                ErrorResponse(error: "none_selected", message: "No AirPlay device selected"),
-                status: .notFound
-            )
+        let selectedSnapshots = await engine.selectedDevices()
+        let devices = await discovery?.devices ?? []
+        guard let first = selectedSnapshots.first, let fullDevice = devices.first(where: { $0.id == first.id }) else {
+            return try jsonResponse(ErrorResponse(error: "none_selected", message: "No AirPlay device selected"), status: .notFound)
         }
+
+        struct OutputCurrentResponse: Encodable {
+            let id: String; let name: String; let model: String?; let supports_airplay_2: Bool
+        }
+
         return try jsonResponse(OutputCurrentResponse(
-            id: device.id,
-            name: device.displayName,
-            model: device.modelID,
-            supports_airplay_2: device.supportsAirPlay2
+            id: fullDevice.id,
+            name: fullDevice.displayName,
+            model: fullDevice.modelID,
+            supports_airplay_2: fullDevice.supportsAirPlay2
         ))
     }
 
@@ -294,22 +398,26 @@ func buildRouter(
         }
         let body = try await request.decode(as: SetOutputRequest.self, context: context)
         let devices = await discovery?.devices ?? []
-        guard let device = devices.first(where: { $0.id == body.id }) else {
+        guard let fullDevice = devices.first(where: { $0.id == body.id }) else {
             return try jsonResponse(
                 ErrorResponse(error: "device_not_found", message: "No AirPlay device with id: \(body.id)"),
                 status: .notFound
             )
         }
         if let appState = appState {
-            await appState.selectAirPlayDevice(device)
+            await appState.setSelectedDevices([body.id])
         } else {
-            await engine.setDevice(device)
+            await engine.setSelectedDevices([fullDevice])
+        }
+
+        struct OutputCurrentResponse: Encodable {
+            let id: String; let name: String; let model: String?; let supports_airplay_2: Bool
         }
         return try jsonResponse(OutputCurrentResponse(
-            id: device.id,
-            name: device.displayName,
-            model: device.modelID,
-            supports_airplay_2: device.supportsAirPlay2
+            id: fullDevice.id,
+            name: fullDevice.displayName,
+            model: fullDevice.modelID,
+            supports_airplay_2: fullDevice.supportsAirPlay2
         ))
     }
 

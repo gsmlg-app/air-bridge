@@ -51,14 +51,15 @@ struct MenuBarView: View {
                 Image(systemName: "airplayaudio")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                if let device = appState.selectedDevice {
-                    Text(device.displayName)
-                        .font(.caption)
-                        .bold()
-                } else {
+
+                if appState.selectedDevices.isEmpty {
                     Text("No AirPlay device")
                         .font(.caption)
                         .foregroundColor(.orange)
+                } else {
+                    Text(selectedDevicesText)
+                        .font(.caption)
+                        .bold()
                 }
             }
 
@@ -123,5 +124,21 @@ struct MenuBarView: View {
         case .paused: return .yellow
         case .error: return .red
         }
+    }
+
+    private var selectedDevicesText: String {
+        guard !appState.selectedDevices.isEmpty else { return "" }
+        let first = appState.selectedDevices[0]
+        let suffix = appState.selectedDevices.count > 1 ? " +\(appState.selectedDevices.count - 1)" : ""
+
+        var statusSuffix = ""
+        if appState.selectedDevices.count == 1 {
+            switch first.status {
+            case .error: statusSuffix = " (error)"
+            case .offline: statusSuffix = " (offline)"
+            default: break
+            }
+        }
+        return "\(first.displayName)\(suffix)\(statusSuffix)"
     }
 }

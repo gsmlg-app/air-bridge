@@ -128,6 +128,14 @@ struct RemoveResponse: Codable, Sendable {
     let queue_length: Int
 }
 
+struct SelectedDeviceInfo: Codable, Sendable {
+    let id: String
+    let name: String
+    let status: String
+    let status_reason: String?
+    let online: Bool
+}
+
 struct AirPlayDeviceInfo: Codable, Sendable {
     let id: String
     let name: String
@@ -135,11 +143,22 @@ struct AirPlayDeviceInfo: Codable, Sendable {
     let supports_airplay_2: Bool
     let requires_pairing: Bool
     let is_selected: Bool
+    let selected_order: Int?
 }
 
 struct OutputsResponse: Codable, Sendable {
     let selected: AirPlayDeviceInfo?
+    let selected_devices: [SelectedDeviceInfo]
     let devices: [AirPlayDeviceInfo]
+}
+
+struct SelectedOutputsResponse: Codable, Sendable {
+    let max: Int
+    let devices: [SelectedDeviceInfo]
+}
+
+struct PutSelectedRequest: Codable, Sendable {
+    let ids: [String]
 }
 
 struct OutputCurrentResponse: Codable, Sendable {
@@ -155,6 +174,7 @@ struct StatusResponse: Codable, Sendable {
     let queue_length: Int
     let queue_position: Int?
     let output: OutputInfo?
+    let outputs: [SelectedDeviceInfo]
     let error: String?
 
     struct TrackRef: Codable, Sendable {

@@ -8,12 +8,11 @@ struct SettingsView: View {
     @AppStorage("listenAddress") private var listenAddress: String = "127.0.0.1"
     @AppStorage("serverPort") private var portString: String = "9876"
     @AppStorage("authToken") private var authToken: String = ""
-    @AppStorage("selectedAirPlayDeviceID") private var selectedDeviceID: String = ""
 
     var body: some View {
         Form {
             Section("AirPlay Output") {
-                if appState.airplayDevices.isEmpty {
+                if appState.airplayDevices.isEmpty && appState.selectedDevices.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         Label("Scanning for AirPlay devices…", systemImage: "dot.radiowaves.left.and.right")
                             .foregroundColor(.secondary)
@@ -23,35 +22,74 @@ struct SettingsView: View {
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(appState.airplayDevices) { device in
-                            Toggle(isOn: binding(for: device)) {
+                        // Show all Bonjour devices, plus any selected offline ones
+                        let allIDs = Set(appState.airplayDevices.map(\.id)).union(appState.selectedDevices.map(\.id))
+                        let sortedIDs = Array(allIDs).sorted()
+
+                        ForEach(sortedIDs, id: \.self) { id in
+                            let device = appState.airplayDevices.first(where: { $0.id == id }) ?? AirPlayDevice(id: id, displayName: id, serviceType: "", txt: [:])
+                            let isSelected = appState.selectedDevices.contains(where: { $0.id == id })
+                            let isAtLimit = appState.selectedDevices.count >= 8
+                            let isDisabled = !isSelected && isAtLimit
+
+                            VStack(alignment: .leading, spacing: 4) {
                                 HStack(spacing: 6) {
-                                    Text(device.displayName)
-                                    if let model = device.modelID {
-                                        Text("(\(model))")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
+                                    Toggle(isOn: binding(for: device)) {
+                                        HStack {
+                                            Text(device.displayName)
+                                            if let model = device.modelID {
+                                                Text("(\(model))").font(.caption).foregroundColor(.secondary)
+                                            }
+                                            if device.supportsAirPlay2 {
+                                                Text("AirPlay 2").font(.caption2).padding(.horizontal, 4).background(Color.blue.opacity(0.2)).cornerRadius(3)
+                                            }
+                                        }
                                     }
-                                    if device.supportsAirPlay2 {
-                                        Text("AirPlay 2")
-                                            .font(.caption2)
-                                            .padding(.horizontal, 4)
-                                            .background(Color.blue.opacity(0.2))
-                                            .cornerRadius(3)
+                                    .toggleStyle(.checkbox)
+                                    .disabled(isDisabled)
+                                    .help(isDisabled ? "Max 8 devices selected." : "")
+
+                                    Spacer()
+
+                                    // Status Badge
+                                    if let sel = appState.selectedDevices.first(where: { $0.id == id }) {
+                                        switch sel.status {
+                                        case .ok:
+                                            Text("● ok").foregroundColor(.green).font(.caption)
+                                        case .pairing:
+                                            Text("◐ pairing").foregroundColor(.yellow).font(.caption)
+                                        case .offline:
+                                            Text("○ offline").foregroundColor(.gray).font(.caption)
+                                        case .error:
+                                            Text("⚠ error").foregroundColor(.red).font(.caption)
+                                        }
                                     }
                                 }
+
+                                // Error Details & Retry
+                                if let sel = appState.selectedDevices.first(where: { $0.id == id }), case .error(let reason) = sel.status {
+                                    HStack {
+                                        Text("└ \(reason)").font(.caption).foregroundColor(.secondary)
+                                        Button("Retry") {
+                                            Task { await appState.engine.retry(deviceID: id) }
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .font(.caption)
+                                        .foregroundColor(.blue)
+                                    }
+                                    .padding(.leading, 24)
+                                }
                             }
-                            .toggleStyle(.checkbox)
                         }
                     }
                 }
 
                 HStack {
-                    Text("Selected: \(selectedDeviceDisplayName)")
+                    Text("\(appState.selectedDevices.count) of 8 selected")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Spacer()
-                    Text("\(appState.airplayDevices.count) device(s)")
+                    Text("\(appState.airplayDevices.count) device(s) found")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -103,22 +141,11 @@ struct SettingsView: View {
         }
     }
 
-    private var selectedDeviceDisplayName: String {
-        if selectedDeviceID.isEmpty { return "(none)" }
-        return appState.airplayDevices.first { $0.id == selectedDeviceID }?.displayName ?? selectedDeviceID
-    }
-
     private func binding(for device: AirPlayDevice) -> Binding<Bool> {
         Binding(
-            get: { selectedDeviceID == device.id },
-            set: { isOn in
-                if isOn {
-                    selectedDeviceID = device.id
-                    Task { await appState.selectAirPlayDevice(device) }
-                } else {
-                    selectedDeviceID = ""
-                    Task { await appState.selectAirPlayDevice(nil) }
-                }
+            get: { appState.selectedDevices.contains(where: { $0.id == device.id }) },
+            set: { _ in
+                Task { await appState.toggleSelection(device) }
             }
         )
     }

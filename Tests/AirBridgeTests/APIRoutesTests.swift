@@ -49,13 +49,13 @@ struct APIRoutesTests {
         }
     }
 
-    @Test func outputsCurrentEndpoint_returnsDevice() async throws {
+    @Test func outputsCurrentEndpoint_noDevice_returns404() async throws {
         let app = try buildTestApplication(engine: PlaybackEngine())
         try await app.test(.live) { client in
             try await client.execute(uri: "/outputs/current", method: .get) { response in
-                #expect(response.status == .ok)
+                #expect(response.status == .notFound)
                 let body = String(buffer: response.body)
-                #expect(body.contains("\"name\""))
+                #expect(body.contains("\"error\":\"none_selected\""))
             }
         }
     }
