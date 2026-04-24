@@ -70,48 +70,61 @@ actor PlaybackEngine {
         let currentIDs = Set(order)
         let reqSet = Set(requestedIDs)
 
+        // 1. Calculate diff
         let toRemove = currentIDs.subtracting(reqSet)
+        let toAdd = reqSet.subtracting(currentIDs)
+
+        // 2. Extract sessions to stop BEFORE modifying dictionaries
+        let sessionsToStop = toRemove.compactMap { sessions[$0] }
+
+        // 3. Synchronously mutate all actor state (No `await` here!)
         for id in toRemove {
-            await sessions[id]?.stop()
             sessions.removeValue(forKey: id)
             statuses.removeValue(forKey: id)
             deviceSnapshots.removeValue(forKey: id)
         }
 
-        let toAdd = reqSet.subtracting(currentIDs)
-        for d in requested where toAdd.contains(d.id) {
-            let session = sessionFactory()
-            if let discovery { await session.attachDiscovery(discovery) }
-            await session.setDevice(d)
-
-            sessions[d.id] = session
-            deviceSnapshots[d.id] = d
-            statuses[d.id] = .pairing
-
-            if !d.supportsAirPlay2 {
-                statuses[d.id] = .error(reason: "AirPlay 2 required")
-                continue
-            }
-
-            Task { [weak self, id = d.id] in
-                do {
-                    try await session.connect()
-                    await self?.updateStatus(id: id, status: .ok)
-                } catch {
-                    await self?.updateStatus(id: id, status: .error(reason: error.localizedDescription))
-                }
-            }
-        }
-
         order = requestedIDs
-        // update displayNames for existing devices in case of rename
+
         for d in requested {
-            if deviceSnapshots[d.id] != nil {
+            if toAdd.contains(d.id) {
+                let session = sessionFactory()
+                sessions[d.id] = session
+                deviceSnapshots[d.id] = d
+                statuses[d.id] = .pairing
+
+                if !d.supportsAirPlay2 {
+                    statuses[d.id] = .error(reason: "AirPlay 2 required")
+                    continue
+                }
+
+                let currentDiscovery = self.discovery
+
+                // Push ALL async actor messages into the connection Task
+                Task { [weak self, id = d.id, session] in
+                    if let currentDiscovery { await session.attachDiscovery(currentDiscovery) }
+                    await session.setDevice(d)
+
+                    do {
+                        try await session.connect()
+                        await self?.updateStatus(id: id, status: .ok)
+                    } catch {
+                        await self?.updateStatus(id: id, status: .error(reason: error.localizedDescription))
+                    }
+                }
+            } else if deviceSnapshots[d.id] != nil {
+                // Update displayNames for existing devices in case of rename
                 deviceSnapshots[d.id] = d
             }
         }
 
+        // Fire callback to reflect new state immediately
         fireStatusCallback()
+
+        // 4. Asynchronously stop old sessions now that internal state is completely settled
+        for session in sessionsToStop {
+            await session.stop()
+        }
     }
 
     private func updateStatus(id: String, status: DeviceStatus) {
