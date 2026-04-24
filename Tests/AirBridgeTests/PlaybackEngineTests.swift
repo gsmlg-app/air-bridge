@@ -28,4 +28,18 @@ final class PlaybackEngineTests: XCTestCase {
             XCTFail("Should have errored due to no discovery")
         }
     }
+
+    func testOfflineAndRetry() async {
+        let engine = PlaybackEngine()
+        let d1 = AirPlayDevice(id: "1", displayName: "One", serviceType: "_airplay._tcp.", txt: [:])
+        await engine.setSelectedDevices([d1])
+        await engine.markOffline(deviceID: "1")
+        
+        let offlineSnap = await engine.selectedDevices()
+        XCTAssertEqual(offlineSnap[0].status, .offline)
+        
+        await engine.retry(deviceID: "1")
+        let retrySnap = await engine.selectedDevices()
+        XCTAssertEqual(retrySnap[0].status, .pairing)
+    }
 }

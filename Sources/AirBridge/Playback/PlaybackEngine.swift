@@ -139,6 +139,28 @@ actor PlaybackEngine {
         statusCallback?(snap)
     }
 
+    func markOffline(deviceID: String) {
+        if statuses[deviceID] != nil {
+            statuses[deviceID] = .offline
+            fireStatusCallback()
+        }
+    }
+
+    func retry(deviceID: String) {
+        guard let session = sessions[deviceID], let _ = deviceSnapshots[deviceID] else { return }
+        statuses[deviceID] = .pairing
+        fireStatusCallback()
+
+        Task { [weak self] in
+            do {
+                try await session.connect()
+                await self?.updateStatus(id: deviceID, status: .ok)
+            } catch {
+                await self?.updateStatus(id: deviceID, status: .error(reason: error.localizedDescription))
+            }
+        }
+    }
+
     /// Legacy hook kept for API compatibility with earlier UID-based callers;
     /// a no-op in the AirPlay architecture because routing is by Bonjour device,
     /// not CoreAudio UID.
@@ -148,21 +170,40 @@ actor PlaybackEngine {
     // MARK: - Playback
 
     func play(track: QueueTrack) async throws {
-        // TODO: Update in next task
-        let _ = URL(fileURLWithPath: track.stagedPath)
-        transition(to: .playing(file: track.originalFilename))
-        Log.playback.info("Playing \(track.originalFilename, privacy: .public)")
+        let url = URL(fileURLWithPath: track.stagedPath)
+        var errors: [String: Error] = [:]
+
+        await withTaskGroup(of: (String, Error?).self) { group in
+            for id in order {
+                guard let session = sessions[id] else { continue }
+                group.addTask {
+                    do { try await session.play(fileURL: url); return (id, nil) }
+                    catch { return (id, error) }
+                }
+            }
+            for await (id, err) in group { if let err = err { errors[id] = err } }
+        }
+
+        if errors.count == order.count, !order.isEmpty {
+            let first = errors.first!
+            let msg = "All devices failed; first=\(first.key): \(first.value.localizedDescription)"
+            transition(to: .error(message: msg))
+            throw first.value
+        } else {
+            transition(to: .playing(file: track.originalFilename))
+            Log.playback.info("Playing \(track.originalFilename, privacy: .public)")
+        }
     }
 
     func stop() async -> PlaybackState {
-        // TODO: Update in next task
+        for id in order {
+            await sessions[id]?.stop()
+        }
         transition(to: .idle)
         return state
     }
 
     func pause() -> PlaybackState {
-        // Pause semantics depend on the RTP streamer (Phase 5). For now, a pause
-        // call while no real stream is running just transitions state.
         if case .playing(let file) = state {
             transition(to: .paused(file: file))
         }
