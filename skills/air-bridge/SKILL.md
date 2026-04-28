@@ -1,13 +1,24 @@
 ---
 name: air-bridge
-description: "How to use AirBridge — a macOS menu bar audio relay that receives audio via HTTP and plays it through AirPlay / HomePod. Use this skill when the user wants to send audio to AirBridge, interact with its API, manage the playback queue, select an output device, or integrate AirBridge into a Python script or automation. Also trigger when the user mentions 'air-bridge', 'airbridge', playing audio on HomePod from code, or audio relay between machines."
+description: "Use AirBridge, a macOS menu bar audio relay that receives audio via HTTP and plays it through selected HomePods or local CoreAudio outputs. Use when the user wants to send audio to AirBridge, call its API, manage playback or queue state, troubleshoot HomePod/AirPlay output, configure multi-HomePod playback, select local outputs, or integrate AirBridge into scripts/automation. Also trigger when the user mentions air-bridge, airbridge, HomePod playback from code, OpenClaw-to-macOS audio relay, or curl uploads to localhost:9876."
 ---
 
 # Using AirBridge
 
-AirBridge runs as a macOS menu bar app on `http://127.0.0.1:9876` by default. It accepts audio uploads via multipart HTTP, queues them, and plays through a selected AirPlay device.
+AirBridge runs as a macOS menu bar app on `http://127.0.0.1:9876` by default. It accepts multipart audio uploads, manages a queue, and plays through either:
 
-Use the CLI tool at `skills/air-bridge/airbridge.py` (Python 3, stdlib only, no dependencies) to interact with AirBridge.
+- selected HomePods / AirPlay receivers from **Settings > HomePod Output**, using Music.app OS-authenticated AirPlay routing
+- a pinned local CoreAudio output selected from **Settings > Audio Output** or `/outputs/current`
+
+Use `skills/air-bridge/airbridge.py` for scriptable API calls. It is Python 3 stdlib only.
+
+## Output Routing Rules
+
+- Use **HomePod Output** checkboxes for multi-HomePod playback. Selecting multiple devices here makes one `/play` request play to all selected HomePods.
+- Do not rely on the **System AirPlay picker** for multiroom playback. macOS `AVRoutePickerView` can collapse HomePod selection to one route.
+- `/outputs` and `/outputs/current` manage local CoreAudio outputs, not HomePod selection.
+- Pinning a local output clears HomePod selection. Selecting a HomePod clears the local output pin.
+- The first Music-backed playback may prompt macOS Automation permission. Allow AirBridge to control Music.
 
 ## Command Reference
 
@@ -27,7 +38,7 @@ airbridge.py [-H HOST] [-p PORT] [-t TOKEN] <command> [args]
 
 | Command | Arguments | Description |
 |---------|-----------|-------------|
-| `play` | `<file>` | Upload an audio file and play it immediately (inserts at current+1 and skips) |
+| `play` | `<file>` | Upload an audio file and play it immediately, replacing the current queue with one track |
 | `queue` | `<file>` | Upload an audio file and append to the end of the queue |
 | `queue-list` | | List all tracks in the queue with id, filename, position, status |
 | `queue-next` | | Skip to the next track |
@@ -38,9 +49,10 @@ airbridge.py [-H HOST] [-p PORT] [-t TOKEN] <command> [args]
 | `pause` | | Pause playback |
 | `resume` | | Resume playback |
 | `stop` | | Stop playback and clear the entire queue |
-| `outputs` | | List all discovered AirPlay devices |
-| `output` | | Show the currently selected AirPlay device |
-| `output-set` | `<id>` | Select an AirPlay device by its Bonjour service ID |
+| `outputs` | | List local CoreAudio output devices and current output state |
+| `output` | | Show the current local output target or system default |
+| `output-set` | `<id>` | Pin playback to a local CoreAudio output UID |
+| `output-clear` | | Clear the local output pin and return to system/HomePod routing |
 
 All commands print JSON to stdout. Errors print to stderr and exit with code 1.
 
@@ -54,7 +66,7 @@ Supported audio formats: `mp3`, `wav`, `m4a`, `aiff`. Max 50 MB per file.
 # Enqueue a file (appends to the end of the queue)
 python skills/air-bridge/airbridge.py queue track.mp3
 
-# Play immediately (inserts at current+1 and skips to it)
+# Play immediately (replaces queue with this one track)
 python skills/air-bridge/airbridge.py play alert.mp3
 ```
 
@@ -90,18 +102,23 @@ python skills/air-bridge/airbridge.py queue-remove TRACK-UUID
 python skills/air-bridge/airbridge.py queue-move TRACK-UUID 0
 ```
 
-### Output Device Selection
+### HomePod and Local Output Selection
 
 ```bash
-# List discovered AirPlay devices
+# List local CoreAudio outputs
 python skills/air-bridge/airbridge.py outputs
 
-# Get currently selected device
+# Get current local output target
 python skills/air-bridge/airbridge.py output
 
-# Select a device by its Bonjour ID
-python skills/air-bridge/airbridge.py output-set BONJOUR-SERVICE-ID
+# Pin a local output by UID
+python skills/air-bridge/airbridge.py output-set CORE-AUDIO-UID
+
+# Clear local pin so HomePod/system routing can be used
+python skills/air-bridge/airbridge.py output-clear
 ```
+
+Select HomePods in the macOS app UI under **Settings > HomePod Output**. Multi-HomePod selection is not exposed through the HTTP API yet.
 
 ### LAN / Cross-Machine Usage
 
@@ -121,7 +138,10 @@ dns-sd -B _air-bridge._tcp local.
 
 ## Troubleshooting
 
-- **No devices in `outputs`** — Click the AirPlay route button in Settings first so CoreAudio registers HomePods via Bonjour.
+- **Only one HomePod plays / another auto-deselects** — Select devices under **HomePod Output**, not the System AirPlay picker. The System picker is single-route on macOS for this app path.
+- **Music automation prompt appears** — Choose Allow. If denied, enable AirBridge under macOS System Settings > Privacy & Security > Automation > Music.
+- **No HomePods in Settings** — Open Music once, confirm HomePods are visible/available there, then click Refresh in AirBridge's HomePod Output section.
+- **No devices in `outputs`** — `/outputs` lists local CoreAudio outputs only. HomePods are selected in the Settings UI.
 - **401 Unauthorized** — Pass `-t TOKEN` if a token is set.
 - **Connection refused** — Confirm AirBridge is running and the address/port match. For LAN, listen address must not be `127.0.0.1`.
 - **400 unsupported_format** — Only `mp3`, `wav`, `m4a`, `aiff` are accepted.

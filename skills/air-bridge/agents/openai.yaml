@@ -1,0 +1,4 @@
+interface:
+  display_name: "AirBridge"
+  short_description: "Control AirBridge audio relay"
+  default_prompt: "Use $air-bridge to play an audio file through selected HomePods with AirBridge."

@@ -127,6 +127,11 @@ def cmd_output_set(args):
     pp(api("PUT", "/outputs/current", args, body=body, content_type="application/json"))
 
 
+def cmd_output_clear(args):
+    body = json.dumps({"id": None}).encode()
+    pp(api("PUT", "/outputs/current", args, body=body, content_type="application/json"))
+
+
 def main():
     parser = argparse.ArgumentParser(prog="airbridge", description="AirBridge CLI")
     parser.add_argument("-H", "--host", default="127.0.0.1", help="AirBridge host (default: 127.0.0.1)")
@@ -158,11 +163,13 @@ def main():
     sub.add_parser("resume", help="Resume playback")
     sub.add_parser("stop", help="Stop playback and clear queue")
 
-    sub.add_parser("outputs", help="List AirPlay devices")
-    sub.add_parser("output", help="Show selected AirPlay device")
+    sub.add_parser("outputs", help="List local CoreAudio output devices")
+    sub.add_parser("output", help="Show current local output target")
 
-    p = sub.add_parser("output-set", help="Select an AirPlay device")
-    p.add_argument("id", help="Bonjour service ID of the device")
+    p = sub.add_parser("output-set", help="Pin playback to a local CoreAudio output UID")
+    p.add_argument("id", help="CoreAudio output UID")
+
+    sub.add_parser("output-clear", help="Clear local output pin")
 
     args = parser.parse_args()
 
@@ -181,6 +188,7 @@ def main():
         "outputs": cmd_outputs,
         "output": cmd_output,
         "output-set": cmd_output_set,
+        "output-clear": cmd_output_clear,
     }
     dispatch[args.command](args)
 
