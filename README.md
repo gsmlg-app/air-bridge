@@ -1,8 +1,10 @@
 # AirBridge
 
-A macOS menu bar app that receives audio files via a local HTTP API, queues them, and plays them through a selected AirPlay / HomePod output.
+A macOS menu bar app that receives audio files via a local HTTP API, queues them, and targets selected AirPlay / HomePod outputs.
 
-AirBridge is a relay bridge between [OpenClaw](https://github.com/gsmlg-app/openclaw) (running on NixOS/Linux) and Apple HomePod — upload an audio file over multipart HTTP, and AirBridge queues and plays it through the AirPlay device you picked in Settings. Devices are discovered via Bonjour and targeted by stable service IDs.
+AirBridge is a relay bridge between [OpenClaw](https://github.com/gsmlg-app/openclaw) (running on NixOS/Linux) and Apple HomePod. Upload an audio file over multipart HTTP, and AirBridge stages it, queues it, and sends playback work to the AirPlay device set you picked in Settings. Devices are discovered via Bonjour and targeted by stable service IDs.
+
+Current AirPlay protocol status: Bonjour discovery, multi-device selection, HAP transient pairing, queueing, and HTTP control are implemented. RTSP negotiation and RTP audio streaming are the next phases, so selected AirPlay sessions can pair, but full network audio streaming is still in progress.
 
 ## Requirements
 
@@ -22,9 +24,9 @@ xcodegen generate
 open AirBridge.xcodeproj
 
 # Or build from command line
-xcodebuild -project AirBridge.xcodeproj -scheme AirBridge build
+xcodebuild -project AirBridge.xcodeproj -scheme AirBridge -configuration Debug build
 
-# Run tests
+# Run tests via SwiftPM
 swift test
 ```
 
@@ -38,7 +40,7 @@ The app appears as a menu bar icon (AirPlay audio symbol); it has no Dock icon (
 
 Open via the **Settings…** button in the menu bar popover.
 
-- **AirPlay Output** — list of AirPlay / HomePod devices discovered via Bonjour (`_airplay._tcp` / `_raop._tcp`); select one to target the engine. Use the built-in AirPlay route button to register HomePods with CoreAudio first.
+- **AirPlay Output** — list of AirPlay / HomePod devices discovered via Bonjour (`_airplay._tcp` / `_raop._tcp`); select up to 8 devices to target. Selected devices show pairing / ok / offline / error status.
 - **Server** — listen address (default `127.0.0.1`) and port (default `9876`).
 - **Authentication** — optional bearer token; leave empty to disable. Includes a **Generate** button that produces a 32-character URL-safe random token.
 - **Restart Server** — applies address / port / token changes without quitting the app.
@@ -66,15 +68,17 @@ All endpoints default to `127.0.0.1:9876`. If an auth token is set, include `Aut
 | `DELETE /queue/:id` | Remove a track by id |
 | `POST /queue/next` | Skip to next track |
 | `POST /queue/prev` | Skip to previous track |
-| `POST /queue/move` | Reorder a track (`{"id": "...", "to": N}`) |
+| `POST /queue/move` | Reorder a track (`{"id": "...", "position": N}`) |
 
-### Output devices
+### Output Devices
 
 | Method & Path | Description |
 |---|---|
-| `GET /outputs` | List discovered AirPlay devices |
-| `GET /outputs/current` | Currently selected AirPlay device |
-| `PUT /outputs/current` | Select AirPlay device by Bonjour ID (`{"id": "BONJOUR-ID"}`) |
+| `GET /outputs` | List discovered AirPlay devices, selected devices, and selected order |
+| `GET /outputs/selected` | List selected AirPlay devices with status (`max` is 8) |
+| `PUT /outputs/selected` | Replace selected devices (`{"ids": ["BONJOUR-ID", "..."]}`; max 8) |
+| `GET /outputs/current` | First selected AirPlay device, kept for single-device clients |
+| `PUT /outputs/current` | Select one AirPlay device by Bonjour ID (`{"id": "BONJOUR-ID"}`) |
 
 ### Examples
 
@@ -88,17 +92,22 @@ curl -X POST http://127.0.0.1:9876/play -F "file=@/path/to/alert.mp3"
 # Status
 curl http://127.0.0.1:9876/status
 
-# Pin to a HomePod (get Bonjour IDs from /outputs)
+# Select one HomePod (get Bonjour IDs from /outputs)
 curl -X PUT http://127.0.0.1:9876/outputs/current \
   -H "Content-Type: application/json" \
   -d '{"id":"BONJOUR-SERVICE-ID"}'
+
+# Select multiple AirPlay outputs
+curl -X PUT http://127.0.0.1:9876/outputs/selected \
+  -H "Content-Type: application/json" \
+  -d '{"ids":["BONJOUR-SERVICE-ID-1","BONJOUR-SERVICE-ID-2"]}'
 ```
 
 Supported formats: `mp3`, `wav`, `m4a`, `aiff`. Upload cap: 50 MB per file. Uploaded files are staged to `~/.airbridge/queue/` and cleaned up on remove / stop / quit.
 
 ## AirPlay Setup
 
-AirBridge discovers AirPlay devices via Bonjour (`_airplay._tcp` and `_raop._tcp`). For HomePods, you must first trigger Apple's AirPlay picker once so CoreAudio registers them. In **Settings → AirPlay Output**, click the built-in AirPlay route button, pick your HomePod, then select it in the device list.
+AirBridge discovers AirPlay devices via Bonjour (`_airplay._tcp` and `_raop._tcp`). Select devices in **Settings → AirPlay Output**. If a HomePod or Apple TV does not appear immediately, make sure it is awake and reachable on the same network, then wait for Bonjour discovery to refresh.
 
 ## Architecture
 
@@ -108,8 +117,8 @@ HTTP multipart upload
   → MultipartFileParser → FileStaging (~/.airbridge/queue/)
   → PlaybackQueue (actor)
   → PlaybackEngine (actor)
-  → AirPlaySession (actor, HAP pairing)
-  → AirPlay device (HomePod / Apple TV / etc.)
+  → AirPlaySession per selected device (actor, HAP pairing)
+  → AirPlay device(s) (HomePod / Apple TV / etc.)
                         │
                         ▼ state callback
                    AppState (@MainActor)
@@ -122,8 +131,8 @@ BonjourDiscovery (actor)
   → AsyncStream<[AirPlayDevice]> → AppState → SettingsView
 ```
 
-- **PlaybackEngine** — Swift actor wrapping `AirPlaySession`; delegates playback and device selection to the session.
-- **AirPlaySession** — actor managing AirPlay device connection, including HAP transient pairing for AirPlay 2 devices.
+- **PlaybackEngine** — Swift actor coordinating selected AirPlay sessions, playback state, and device status callbacks.
+- **AirPlaySession** — actor managing a single AirPlay device connection, including HAP transient pairing for AirPlay 2 devices.
 - **BonjourDiscovery** — actor browsing Bonjour for AirPlay devices; publishes updates as an async stream.
 - **PlaybackQueue** — actor managing ordered tracks with auto-advance.
 - **AppState** — `@MainActor ObservableObject`; owns server lifecycle, Bonjour discovery consumption, queue sync.
@@ -131,10 +140,11 @@ BonjourDiscovery (actor)
 
 ### Key constraints
 
-- Audio plays on the selected AirPlay device — the system default is never changed.
+- AirBridge targets selected AirPlay devices directly; the system default output is never changed.
 - Server binds to `127.0.0.1` by default; LAN binding requires changing the listen address *and* setting an auth token.
 - Device identification uses stable Bonjour service IDs.
-- AirPlay 2 protocol integration is phased: Phase 1 (Bonjour discovery + session skeleton) is complete.
+- Up to 8 AirPlay devices can be selected at once.
+- AirPlay 2 protocol integration is phased: Bonjour discovery, session management, and HAP pairing are implemented; RTSP/RTP audio streaming is in progress.
 - Logging via `os.Logger`, subsystem `com.gsmlg.airbridge` (categories: `http`, `playback`, `server`, `queue`, `output`).
 
 ## Mac App Store Distribution
