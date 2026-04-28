@@ -29,7 +29,6 @@ struct AuthMiddleware: RouterMiddleware {
 func buildRouter(
     engine: PlaybackEngine,
     queue: PlaybackQueue,
-    discovery: BonjourDiscovery?,
     appState: AppState?,
     authToken: String = ""
 ) -> Router<BasicRequestContext> {
@@ -43,26 +42,16 @@ func buildRouter(
     router.get("status") { _, _ -> Response in
         let engineState = await engine.state
         let queueState = await queue.list()
-        let selectedSnapshots = await engine.selectedDevices()
+        let engineUID = await engine.outputDeviceUID
+        let devices = AudioDeviceManager.allOutputDevices(engineTargetUID: engineUID)
+        let defaultUID = AudioDeviceManager.deviceUID(for: AudioDeviceManager.getDefaultOutputDeviceID())
+        let engineDevice = devices.first { $0.isEngineTarget }
+        let defaultDevice = devices.first { $0.isSystemDefault }
+        let airplayRoute = defaultDevice?.transport == .airplay ? defaultDevice?.name : nil
 
         let track: StatusResponse.TrackRef? = queueState.currentTrack.map {
             .init(id: $0.id.uuidString, filename: $0.originalFilename)
         }
-
-        let outputsInfo = selectedSnapshots.map { s -> SelectedDeviceInfo in
-            let reason: String? = { if case .error(let r) = s.status { return r }; return nil }()
-            let statusStr: String = {
-                switch s.status {
-                case .pairing: return "pairing"
-                case .ok: return "ok"
-                case .offline: return "offline"
-                case .error: return "error"
-                }
-            }()
-            return SelectedDeviceInfo(id: s.id, name: s.displayName, status: statusStr, status_reason: reason, online: s.status != .offline)
-        }
-
-        let first = selectedSnapshots.first
 
         let resp = StatusResponse(
             status: engineState.statusString,
@@ -70,17 +59,18 @@ func buildRouter(
             queue_length: queueState.tracks.count,
             queue_position: queueState.currentIndex,
             output: StatusResponse.OutputInfo(
-                airplay_device_id: first?.id,
-                airplay_device_name: first?.displayName
+                engine_target: engineUID,
+                engine_target_name: engineDevice?.name,
+                system_default: defaultUID,
+                airplay_route: airplayRoute
             ),
-            outputs: outputsInfo,
             error: engineState.errorMessage
         )
         return try jsonResponse(resp)
     }
 
     // POST /queue — enqueue via multipart
-    router.post("queue") { request, context -> Response in
+    router.post("queue") { request, _ -> Response in
         do {
             let upload = try await MultipartFileParser.extractFile(from: request)
 
@@ -119,7 +109,7 @@ func buildRouter(
     }
 
     // POST /play — upload and play immediately
-    router.post("play") { request, context -> Response in
+    router.post("play") { request, _ -> Response in
         do {
             let upload = try await MultipartFileParser.extractFile(from: request)
 
@@ -271,156 +261,88 @@ func buildRouter(
 
     // GET /outputs
     router.get("outputs") { _, _ -> Response in
-        let devices = await discovery?.devices ?? []
-        let selectedSnapshots = await engine.selectedDevices()
-        let selectedIDs = selectedSnapshots.map(\.id)
+        let engineUID = await engine.outputDeviceUID
+        let devices = AudioDeviceManager.allOutputDevices(engineTargetUID: engineUID)
+        let defaultUID = AudioDeviceManager.deviceUID(for: AudioDeviceManager.getDefaultOutputDeviceID())
+        let defaultDevice = devices.first { $0.isSystemDefault }
+        let airplayRoute = defaultDevice?.transport == .airplay ? defaultDevice?.name : nil
 
-        let infos = devices.map { d -> AirPlayDeviceInfo in
-            let order = selectedIDs.firstIndex(of: d.id)
-            return AirPlayDeviceInfo(
-                id: d.id,
-                name: d.displayName,
-                model: d.modelID,
-                supports_airplay_2: d.supportsAirPlay2,
-                requires_pairing: d.requiresPairing,
-                is_supported_target: d.isSupportedTarget,
-                unsupported_reason: d.unsupportedTargetReason,
-                is_selected: order != nil,
-                selected_order: order
-            )
-        }
-
-        let outputsInfo = selectedSnapshots.map { s -> SelectedDeviceInfo in
-            let reason: String? = { if case .error(let r) = s.status { return r }; return nil }()
-            let statusStr: String = {
-                switch s.status {
-                case .pairing: return "pairing"
-                case .ok: return "ok"
-                case .offline: return "offline"
-                case .error: return "error"
-                }
-            }()
-            return SelectedDeviceInfo(id: s.id, name: s.displayName, status: statusStr, status_reason: reason, online: s.status != .offline)
-        }
-
-        let firstSelected = infos.first { $0.is_selected && $0.selected_order == 0 }
-
-        return try jsonResponse(OutputsResponse(selected: firstSelected, selected_devices: outputsInfo, devices: infos))
-    }
-
-    // GET /outputs/selected
-    router.get("outputs/selected") { _, _ -> Response in
-        let selectedSnapshots = await engine.selectedDevices()
-        let outputsInfo = selectedSnapshots.map { s -> SelectedDeviceInfo in
-            let reason: String? = { if case .error(let r) = s.status { return r }; return nil }()
-            let statusStr: String = {
-                switch s.status {
-                case .pairing: return "pairing"
-                case .ok: return "ok"
-                case .offline: return "offline"
-                case .error: return "error"
-                }
-            }()
-            return SelectedDeviceInfo(id: s.id, name: s.displayName, status: statusStr, status_reason: reason, online: s.status != .offline)
-        }
-        return try jsonResponse(SelectedOutputsResponse(max: 8, devices: outputsInfo))
-    }
-
-    // PUT /outputs/selected
-    router.put("outputs/selected") { request, context -> Response in
-        guard let body = try? await request.decode(as: PutSelectedRequest.self, context: context) else {
-            return try jsonResponse(ErrorResponse(error: "invalid_request", message: "Missing 'ids' array"), status: .badRequest)
-        }
-
-        if body.ids.count > 8 {
-            return try jsonResponse(ErrorResponse(error: "too_many_devices", message: "max 8 devices"), status: .badRequest)
-        }
-
-        var seen = Set<String>()
-        for id in body.ids {
-            if seen.contains(id) {
-                return try jsonResponse(ErrorResponse(error: "duplicate_ids", message: "id '\(id)' appears twice"), status: .badRequest)
-            }
-            seen.insert(id)
-            let devices = await discovery?.devices ?? []
-            if !devices.contains(where: { $0.id == id }) {
-                return try jsonResponse(ErrorResponse(error: "device_not_found", message: "No AirPlay device with id: \(id)"), status: .notFound)
-            }
-        }
-
-        if let appState = appState {
-            await appState.setSelectedDevices(body.ids)
-        } else {
-            // For tests
-            let devices = await discovery?.devices ?? []
-            let toSelect = body.ids.compactMap { id in devices.first(where: { $0.id == id }) }
-            await engine.setSelectedDevices(toSelect)
-        }
-
-        let selectedSnapshots = await engine.selectedDevices()
-        let outputsInfo = selectedSnapshots.map { s -> SelectedDeviceInfo in
-            let reason: String? = { if case .error(let r) = s.status { return r }; return nil }()
-            let statusStr: String = {
-                switch s.status {
-                case .pairing: return "pairing"
-                case .ok: return "ok"
-                case .offline: return "offline"
-                case .error: return "error"
-                }
-            }()
-            return SelectedDeviceInfo(id: s.id, name: s.displayName, status: statusStr, status_reason: reason, online: s.status != .offline)
-        }
-        return try jsonResponse(SelectedOutputsResponse(max: 8, devices: outputsInfo))
-    }
-
-    // GET /outputs/current — currently-selected AirPlay device
-    router.get("outputs/current") { _, _ -> Response in
-        let selectedSnapshots = await engine.selectedDevices()
-        let devices = await discovery?.devices ?? []
-        guard let first = selectedSnapshots.first, let fullDevice = devices.first(where: { $0.id == first.id }) else {
-            return try jsonResponse(ErrorResponse(error: "none_selected", message: "No AirPlay device selected"), status: .notFound)
-        }
-
-        struct OutputCurrentResponse: Encodable {
-            let id: String; let name: String; let model: String?; let supports_airplay_2: Bool
-        }
-
-        return try jsonResponse(OutputCurrentResponse(
-            id: fullDevice.id,
-            name: fullDevice.displayName,
-            model: fullDevice.modelID,
-            supports_airplay_2: fullDevice.supportsAirPlay2
+        return try jsonResponse(OutputsResponse(
+            current_engine_target: engineUID,
+            current_system_default: defaultUID,
+            current_airplay_route: airplayRoute,
+            devices: devices
         ))
     }
 
-    // PUT /outputs/current — select an AirPlay device by Bonjour id
+    // GET /outputs/current
+    router.get("outputs/current") { _, _ -> Response in
+        let engineUID = await engine.outputDeviceUID
+        let devices = AudioDeviceManager.allOutputDevices(engineTargetUID: engineUID)
+
+        if let engineUID {
+            let device = devices.first { $0.id == engineUID }
+            return try jsonResponse(OutputCurrentResponse(
+                id: engineUID,
+                name: device?.name ?? "Unknown",
+                transport: device?.transport.rawValue ?? AudioTransport.other.rawValue,
+                hot_swapped: nil
+            ))
+        }
+
+        let defaultUID = AudioDeviceManager.deviceUID(for: AudioDeviceManager.getDefaultOutputDeviceID()) ?? ""
+        let device = devices.first { $0.isSystemDefault }
+        return try jsonResponse(OutputCurrentResponse(
+            id: defaultUID,
+            name: device?.name ?? "System Default",
+            transport: device?.transport.rawValue ?? AudioTransport.other.rawValue,
+            hot_swapped: nil
+        ))
+    }
+
+    // PUT /outputs/current
     router.put("outputs/current") { request, context -> Response in
         struct SetOutputRequest: Decodable {
-            let id: String
-        }
-        let body = try await request.decode(as: SetOutputRequest.self, context: context)
-        let devices = await discovery?.devices ?? []
-        guard let fullDevice = devices.first(where: { $0.id == body.id }) else {
-            return try jsonResponse(
-                ErrorResponse(error: "device_not_found", message: "No AirPlay device with id: \(body.id)"),
-                status: .notFound
-            )
-        }
-        if let appState = appState {
-            await appState.setSelectedDevices([body.id])
-        } else {
-            await engine.setSelectedDevices([fullDevice])
+            let id: String?
         }
 
-        struct OutputCurrentResponse: Encodable {
-            let id: String; let name: String; let model: String?; let supports_airplay_2: Bool
+        let body = try await request.decode(as: SetOutputRequest.self, context: context)
+        do {
+            let hotSwapped: Bool
+            let selectedID: String?
+            if let id = body.id, !id.isEmpty {
+                hotSwapped = try await engine.setOutputDevice(uid: id)
+                selectedID = id
+                UserDefaults.standard.set(id, forKey: "engineOutputDeviceUID")
+            } else {
+                await engine.clearOutputDevice()
+                selectedID = nil
+                hotSwapped = false
+                UserDefaults.standard.removeObject(forKey: "engineOutputDeviceUID")
+            }
+
+            let devices = AudioDeviceManager.allOutputDevices(engineTargetUID: selectedID)
+            let device = selectedID.flatMap { id in devices.first { $0.id == id } }
+            let defaultDevice = devices.first { $0.isSystemDefault }
+            let defaultUID = AudioDeviceManager.deviceUID(for: AudioDeviceManager.getDefaultOutputDeviceID()) ?? ""
+
+            return try jsonResponse(OutputCurrentResponse(
+                id: selectedID ?? defaultUID,
+                name: device?.name ?? defaultDevice?.name ?? "System Default",
+                transport: device?.transport.rawValue ?? defaultDevice?.transport.rawValue ?? AudioTransport.other.rawValue,
+                hot_swapped: hotSwapped
+            ))
+        } catch PlaybackEngineError.deviceNotFound(let uid) {
+            return try jsonResponse(
+                ErrorResponse(error: "device_not_found", message: "Device not found: \(uid)"),
+                status: .notFound
+            )
+        } catch PlaybackEngineError.deviceUnavailable(let uid) {
+            return try jsonResponse(
+                ErrorResponse(error: "device_unavailable", message: "Device unavailable: \(uid)"),
+                status: .badRequest
+            )
         }
-        return try jsonResponse(OutputCurrentResponse(
-            id: fullDevice.id,
-            name: fullDevice.displayName,
-            model: fullDevice.modelID,
-            supports_airplay_2: fullDevice.supportsAirPlay2
-        ))
     }
 
     return router
@@ -445,6 +367,6 @@ func buildTestApplication(
     authToken: String = ""
 ) throws -> some ApplicationProtocol {
     let q = queue ?? PlaybackQueue(engine: engine)
-    let router = buildRouter(engine: engine, queue: q, discovery: nil, appState: nil, authToken: authToken)
+    let router = buildRouter(engine: engine, queue: q, appState: nil, authToken: authToken)
     return Application(router: router, configuration: .init(address: .hostname("127.0.0.1", port: 0)))
 }

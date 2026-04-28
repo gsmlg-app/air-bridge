@@ -31,11 +31,15 @@ actor PlaybackQueue {
     }
 
     func playNow(track: QueueTrack) async {
-        let insertIndex = (state.currentIndex ?? -1) + 1
-        state.tracks.insert(track, at: insertIndex)
-        state.currentIndex = insertIndex
-        Log.queue.info("Play now: '\(track.originalFilename, privacy: .public)' at position \(insertIndex)")
+        let replacedTracks = state.tracks
+        state.tracks = [track]
+        state.currentIndex = 0
+        Log.queue.info("Play now: '\(track.originalFilename, privacy: .public)' as the only queue item")
         await playCurrentTrack()
+
+        for replacedTrack in replacedTracks where replacedTrack.stagedPath != track.stagedPath {
+            FileStaging.remove(url: URL(fileURLWithPath: replacedTrack.stagedPath))
+        }
     }
 
     func remove(id: UUID) async -> Bool {

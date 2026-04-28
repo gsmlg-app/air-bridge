@@ -38,24 +38,28 @@ struct APIRoutesTests {
         }
     }
 
-    @Test func outputsEndpoint_returnsDevices() async throws {
+    @Test func outputsEndpoint_returnsCoreAudioOutputState() async throws {
         let app = try buildTestApplication(engine: PlaybackEngine())
         try await app.test(.live) { client in
             try await client.execute(uri: "/outputs", method: .get) { response in
                 #expect(response.status == .ok)
                 let body = String(buffer: response.body)
                 #expect(body.contains("\"devices\""))
+                #expect(body.contains("\"current_engine_target\""))
+                #expect(body.contains("\"current_system_default\""))
+                #expect(!body.contains("\"requires_pairing\""))
+                #expect(!body.contains("\"selected_devices\""))
             }
         }
     }
 
-    @Test func outputsCurrentEndpoint_noDevice_returns404() async throws {
+    @Test func outputsCurrentEndpoint_noPinnedDevice_returnsSystemDefault() async throws {
         let app = try buildTestApplication(engine: PlaybackEngine())
         try await app.test(.live) { client in
             try await client.execute(uri: "/outputs/current", method: .get) { response in
-                #expect(response.status == .notFound)
+                #expect(response.status == .ok)
                 let body = String(buffer: response.body)
-                #expect(body.contains("\"error\":\"none_selected\""))
+                #expect(body.contains("\"hot_swapped\":null"))
             }
         }
     }

@@ -47,21 +47,17 @@ struct MenuBarView: View {
 
             Divider()
 
-            // AirPlay target
+            // Output target
             HStack {
                 Image(systemName: "airplayaudio")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
-                if appState.selectedDevices.isEmpty {
-                    Text("No AirPlay device")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                } else {
-                    Text(selectedDevicesText)
-                        .font(.caption)
-                        .bold()
-                }
+                Text(appState.currentOutputName)
+                    .font(.caption)
+                    .bold()
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
 
             // Error
@@ -131,19 +127,4 @@ struct MenuBarView: View {
         }
     }
 
-    private var selectedDevicesText: String {
-        guard !appState.selectedDevices.isEmpty else { return "" }
-        let first = appState.selectedDevices[0]
-        let suffix = appState.selectedDevices.count > 1 ? " +\(appState.selectedDevices.count - 1)" : ""
-
-        var statusSuffix = ""
-        if appState.selectedDevices.count == 1 {
-            switch first.status {
-            case .error: statusSuffix = " (error)"
-            case .offline: statusSuffix = " (offline)"
-            default: break
-            }
-        }
-        return "\(first.displayName)\(suffix)\(statusSuffix)"
-    }
 }

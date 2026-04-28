@@ -8,111 +8,104 @@ struct SettingsView: View {
     @AppStorage("listenAddress") private var listenAddress: String = "127.0.0.1"
     @AppStorage("serverPort") private var portString: String = "9876"
     @AppStorage("authToken") private var authToken: String = ""
+    @AppStorage("engineOutputDeviceUID") private var selectedOutputUID: String = ""
 
     var body: some View {
+        TabView {
+            settingsForm
+                .tabItem {
+                    Label("Settings", systemImage: "gearshape")
+                }
+
+            apiDocs
+                .tabItem {
+                    Label("API Docs", systemImage: "doc.text")
+                }
+        }
+        .frame(width: 460, height: 540)
+        .onAppear {
+            appState.refreshOutputDevices(engineTargetUID: selectedOutputUID.isEmpty ? nil : selectedOutputUID)
+        }
+    }
+
+    private var settingsForm: some View {
         Form {
-            Section("AirPlay Output") {
-                if appState.airplayDevices.isEmpty && appState.selectedDevices.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("Scanning for AirPlay devices…", systemImage: "dot.radiowaves.left.and.right")
-                            .foregroundColor(.secondary)
-                        Text("HomePods and Apple TVs on your Wi-Fi network should appear here within a few seconds.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+            Section("HomePod Output") {
+                if let error = appState.musicAirPlayError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                if appState.musicAirPlayDevices.isEmpty {
+                    Text("No Music AirPlay devices found.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        // Show all Bonjour devices, plus any selected offline ones
-                        let allIDs = Set(appState.airplayDevices.map(\.id)).union(appState.selectedDevices.map(\.id))
-                        let sortedIDs = Array(allIDs).sorted()
-
-                        ForEach(sortedIDs, id: \.self) { id in
-                            let device = appState.airplayDevices.first(where: { $0.id == id }) ?? AirPlayDevice(id: id, displayName: id, serviceType: "", txt: [:])
-                            let isSelected = appState.selectedDevices.contains(where: { $0.id == id })
-                            let isAtLimit = appState.selectedDevices.count >= 8
-                            let unsupportedReason = device.unsupportedTargetReason
-                            let isDisabled = !isSelected && (isAtLimit || unsupportedReason != nil)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack(spacing: 6) {
-                                    Toggle(isOn: binding(for: device)) {
-                                        HStack {
-                                            Text(device.displayName)
-                                            if let model = device.modelID {
-                                                Text("(\(model))").font(.caption).foregroundColor(.secondary)
-                                            }
-                                            if device.supportsAirPlay2 {
-                                                Text("AirPlay 2").font(.caption2).padding(.horizontal, 4).background(Color.blue.opacity(0.2)).cornerRadius(3)
-                                            }
-                                            if unsupportedReason != nil {
-                                                Text("Unsupported").font(.caption2).padding(.horizontal, 4).background(Color.gray.opacity(0.18)).cornerRadius(3)
-                                            }
-                                        }
-                                    }
-                                    .toggleStyle(.checkbox)
-                                    .disabled(isDisabled)
-                                    .help(unsupportedReason ?? (isDisabled ? "Max 8 devices selected." : ""))
-
-                                    Spacer()
-
-                                    // Status Badge
-                                    if let sel = appState.selectedDevices.first(where: { $0.id == id }) {
-                                        switch sel.status {
-                                        case .ok:
-                                            Text("● ok").foregroundColor(.green).font(.caption)
-                                        case .pairing:
-                                            Text("◐ pairing").foregroundColor(.yellow).font(.caption)
-                                        case .offline:
-                                            Text("○ offline").foregroundColor(.gray).font(.caption)
-                                        case .error:
-                                            Text("⚠ error").foregroundColor(.red).font(.caption)
-                                        }
-                                    }
-                                }
-
-                                // Error Details & Retry
-                                if let sel = appState.selectedDevices.first(where: { $0.id == id }), case .error(let reason) = sel.status {
-                                    HStack {
-                                        Text("└ \(reason)").font(.caption).foregroundColor(.secondary)
-                                        if device.isSupportedTarget {
-                                            Button("Retry") {
-                                                Task { await appState.engine.retry(deviceID: id) }
-                                            }
-                                            .buttonStyle(.borderless)
-                                            .font(.caption)
-                                            .foregroundColor(.blue)
-                                        }
-                                    }
-                                    .padding(.leading, 24)
-                                } else if let unsupportedReason {
-                                    Text("└ \(unsupportedReason)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.leading, 24)
-                                }
+                    ForEach(appState.musicAirPlayDevices) { device in
+                        Toggle(isOn: musicAirPlayBinding(for: device)) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(device.name)
+                                Text("\(device.kind) - \(device.available ? "available" : "offline")")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
                         }
+                        .toggleStyle(.checkbox)
+                        .disabled(!device.available)
                     }
                 }
 
                 HStack {
-                    Text("\(appState.selectedDevices.count) of 8 selected")
+                    Text("\(appState.selectedMusicAirPlayDeviceIDs.count) selected")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Spacer()
-                    Text("\(appState.airplayDevices.count) device(s) found")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                    Button("Refresh") {
+                        Task { await appState.refreshMusicAirPlayDevices() }
+                    }
+                    .font(.caption)
+                }
+            }
+
+            Section("Audio Output") {
+                Picker("Play Target", selection: $selectedOutputUID) {
+                    Text("System Default").tag("")
+                    ForEach(appState.outputDevices.filter { $0.transport != .airplay }) { device in
+                        Text("\(device.name) (\(device.transport.rawValue))").tag(device.id)
+                    }
+                }
+                .onChange(of: selectedOutputUID) { _, newValue in
+                    Task {
+                        do {
+                            _ = try await appState.setOutputDevice(uid: newValue.isEmpty ? nil : newValue)
+                            if !newValue.isEmpty {
+                                selectedOutputUID = newValue
+                            }
+                        } catch {
+                            Log.output.error("Failed to set output device: \(error.localizedDescription, privacy: .public)")
+                        }
+                    }
                 }
 
                 HStack(spacing: 8) {
-                    RoutePickerWrapper()
+                    RoutePickerWrapper(player: OutputRoutingPolicy.systemAirPlayRoutePickerPlayer(for: appState.routePickerPlayer)) {
+                        selectedOutputUID = ""
+                        Task {
+                            await appState.clearPinnedOutputForSystemRouting()
+                        }
+                    }
                         .frame(width: 28, height: 24)
                     Text("System AirPlay picker")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Spacer()
+                    Button("Refresh") {
+                        appState.refreshOutputDevices(engineTargetUID: selectedOutputUID.isEmpty ? nil : selectedOutputUID)
+                    }
+                    .font(.caption)
                 }
+
             }
 
             Section("Server") {
@@ -131,7 +124,7 @@ struct SettingsView: View {
                     }
                     .help("Generate a new random 32-character token")
                 }
-                Text("Leave empty to disable authentication")
+                Text("Leave empty to disable HTTP API authentication")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -155,14 +148,66 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 560)
     }
 
-    private func binding(for device: AirPlayDevice) -> Binding<Bool> {
+    private var apiDocs: some View {
+        let baseURL = APIServiceDocumentation.baseURL(address: listenAddress, port: portString)
+        let examples = APIServiceDocumentation.examples(baseURL: baseURL)
+
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Base URL")
+                        .font(.headline)
+                    codeBlock(baseURL)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Authentication")
+                        .font(.headline)
+                    Text("When Auth Token is set, add this header to every request.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    codeBlock(#"-H "\#(APIServiceDocumentation.authHeaderExample)""#)
+                }
+
+                ForEach(examples) { example in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(example.title)
+                            .font(.headline)
+                        Text(example.description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        codeBlock(example.command)
+                    }
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    private func codeBlock(_ value: String) -> some View {
+        Text(value)
+            .font(.system(.caption, design: .monospaced))
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func musicAirPlayBinding(for device: MusicAirPlayDevice) -> Binding<Bool> {
         Binding(
-            get: { appState.selectedDevices.contains(where: { $0.id == device.id }) },
-            set: { _ in
-                Task { await appState.toggleSelection(device) }
+            get: {
+                appState.selectedMusicAirPlayDeviceIDs.contains(device.id)
+            },
+            set: { isSelected in
+                if isSelected {
+                    selectedOutputUID = ""
+                }
+                Task {
+                    await appState.setMusicAirPlayDevice(id: device.id, selected: isSelected)
+                }
             }
         )
     }

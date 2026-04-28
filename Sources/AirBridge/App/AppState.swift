@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Hummingbird
 import SwiftUI
@@ -7,40 +8,42 @@ import os
 final class AppState: ObservableObject {
     @Published var playbackState: PlaybackState = .idle
     @Published var queueState: QueueState = QueueState()
-    @Published var airplayDevices: [AirPlayDevice] = []
-    @Published var selectedDevices: [SelectedDevice] = []
+    @Published var outputDevices: [AudioOutputDeviceInfo] = []
+    @Published var musicAirPlayDevices: [MusicAirPlayDevice] = []
+    @Published var selectedMusicAirPlayDeviceIDs: [String] = []
+    @Published var musicAirPlayError: String?
+    @Published var currentOutputName: String = "System Default"
 
     @Published var listenAddress: String
     @Published var serverPort: Int
     @Published var authToken: String
     @Published var serverRunning: Bool = false
 
-    let engine = PlaybackEngine()
+    let routePickerPlayer: AVPlayer
+    let engine: PlaybackEngine
     let queue: PlaybackQueue
-    let discovery = BonjourDiscovery()
     let advertiser = ServiceAdvertiser()
+    private let musicController: MusicAppBridge
     private var serverTask: Task<Void, Never>?
-    private var discoveryTask: Task<Void, Never>?
+    private static let musicAirPlayDeviceIDsKey = "musicAirPlayDeviceIDs"
 
     init() {
         self.listenAddress = UserDefaults.standard.string(forKey: "listenAddress") ?? "127.0.0.1"
         let portStr = UserDefaults.standard.string(forKey: "serverPort") ?? "9876"
         self.serverPort = Int(portStr) ?? 9876
         self.authToken = UserDefaults.standard.string(forKey: "authToken") ?? ""
+        self.selectedMusicAirPlayDeviceIDs = UserDefaults.standard.array(forKey: Self.musicAirPlayDeviceIDsKey) as? [String] ?? []
 
+        let player = AVPlayer()
+        let musicController = MusicAppBridge()
+        self.musicController = musicController
+        self.routePickerPlayer = player
+        let engine = PlaybackEngine(player: player, musicController: musicController)
+        self.engine = engine
         self.queue = PlaybackQueue(engine: engine)
 
-        // Status callback from playback engine (multi-device) → SwiftUI
         Task {
-            await engine.setStatusCallback { [weak self] devices in
-                Task { @MainActor in
-                    self?.selectedDevices = devices
-                }
-            }
-        }
-
-        // State callback from playback engine → SwiftUI
-        Task {
+            await engine.setMusicAirPlayDeviceIDs(selectedMusicAirPlayDeviceIDs)
             await engine.setStateCallback { [weak self] newState in
                 Task { @MainActor in
                     self?.playbackState = newState
@@ -48,117 +51,161 @@ final class AppState: ObservableObject {
             }
         }
 
-        // Start Bonjour discovery and consume updates. Also hand the discovery
-        // actor to the playback session so it can resolve endpoints at connect time.
-        Task { [engine, discovery] in
-            await engine.attachDiscovery(discovery)
-            await discovery.start()
+        if !selectedMusicAirPlayDeviceIDs.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "engineOutputDeviceUID")
+        }
+        let savedUID = selectedMusicAirPlayDeviceIDs.isEmpty ? UserDefaults.standard.string(forKey: "engineOutputDeviceUID") : nil
+        let restorableUID = OutputRoutingPolicy.restorablePinnedUID(
+            from: savedUID,
+            transportForUID: OutputRoutingPolicy.transportForUID
+        )
+        if savedUID != restorableUID {
+            UserDefaults.standard.removeObject(forKey: "engineOutputDeviceUID")
         }
 
-        discoveryTask = Task { [weak self] in
-            guard let self else { return }
-            let stream = await self.discovery.updates()
-            for await devices in stream {
-                await MainActor.run {
-                    self.airplayDevices = devices
+        if let savedUID = restorableUID {
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    _ = try await self.engine.setOutputDevice(uid: savedUID)
+                } catch {
+                    Log.output.error("Failed to restore output device \(savedUID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    UserDefaults.standard.removeObject(forKey: "engineOutputDeviceUID")
                 }
-
-                // Handle offline/retry
-                let currentSelected = await self.engine.selectedDevices()
-                for sel in currentSelected {
-                    let inBonjour = devices.contains(where: { $0.id == sel.id })
-                    if !inBonjour && sel.status != .offline {
-                        await self.engine.markOffline(deviceID: sel.id)
-                    } else if inBonjour && sel.status == .offline {
-                        await self.engine.retry(deviceID: sel.id)
-                    }
-                }
+                await MainActor.run { self.refreshOutputDevices() }
             }
+        } else {
+            refreshOutputDevices()
         }
 
-        // Periodic queue state sync
+        Task {
+            await refreshMusicAirPlayDevices()
+        }
+
+        // Periodic state sync. This also reflects system AirPlay picker changes
+        // that alter the current macOS default output route.
         Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
                 let q = await queue.list()
-                self.queueState = q
-            }
-        }
-
-        // Restore previously-saved devices
-        let savedIDs: [String]
-        if let data = UserDefaults.standard.data(forKey: "selectedAirPlayDeviceIDs"),
-           let decoded = try? JSONDecoder().decode([String].self, from: data) {
-            savedIDs = decoded
-        } else if let legacyID = UserDefaults.standard.string(forKey: "selectedAirPlayDeviceID"), !legacyID.isEmpty {
-            savedIDs = [legacyID]
-            let data = try? JSONEncoder().encode(savedIDs)
-            UserDefaults.standard.set(data, forKey: "selectedAirPlayDeviceIDs")
-            UserDefaults.standard.removeObject(forKey: "selectedAirPlayDeviceID")
-        } else {
-            savedIDs = []
-        }
-
-        if !savedIDs.isEmpty {
-            Task { [weak self] in
-                guard let self else { return }
-                // Seed offline devices immediately so UI shows them
-                let offlineDevices = savedIDs.map { id in
-                    AirPlayDevice(id: id, displayName: id, serviceType: "_airplay._tcp.", txt: [:])
-                }
-                await self.engine.setSelectedDevices(offlineDevices)
-                for id in savedIDs {
-                    await self.engine.markOffline(deviceID: id)
-                }
-
-                try? await Task.sleep(for: .seconds(2))
-                let devices = await MainActor.run { self.airplayDevices }
-                let toSelect = savedIDs.compactMap { id in devices.first(where: { $0.id == id }) }
-                if !toSelect.isEmpty {
-                    await self.engine.setSelectedDevices(toSelect)
+                let engineUID = await engine.outputDeviceUID
+                await MainActor.run {
+                    self.queueState = q
+                    self.refreshOutputDevices(engineTargetUID: engineUID)
                 }
             }
         }
 
         startServer()
     }
-    /// Replaces the entire selection based on HTTP API requests.
-    func setSelectedDevices(_ ids: [String]) async {
-        let devices = await MainActor.run { self.airplayDevices }
-        var resolved: [AirPlayDevice] = []
-        for id in ids {
-            if let d = devices.first(where: { $0.id == id }) {
-                resolved.append(d)
-            } else {
-                // Unknown to Bonjour right now, construct a stub to track offline
-                resolved.append(AirPlayDevice(id: id, displayName: id, serviceType: "_airplay._tcp.", txt: [:]))
-            }
-        }
-        if let data = try? JSONEncoder().encode(ids) {
-            UserDefaults.standard.set(data, forKey: "selectedAirPlayDeviceIDs")
-        }
-        await engine.setSelectedDevices(resolved)
 
-        // Mark unknown ones offline immediately
-        for id in ids {
-            if !devices.contains(where: { $0.id == id }) {
-                await engine.markOffline(deviceID: id)
+    func setOutputDevice(uid: String?) async throws -> Bool {
+        if let uid, !uid.isEmpty {
+            await clearMusicAirPlaySelection()
+            let hotSwapped = try await engine.setOutputDevice(uid: uid)
+            UserDefaults.standard.set(uid, forKey: "engineOutputDeviceUID")
+            refreshOutputDevices(engineTargetUID: uid)
+            return hotSwapped
+        }
+
+        await engine.clearOutputDevice()
+        UserDefaults.standard.removeObject(forKey: "engineOutputDeviceUID")
+        refreshOutputDevices(engineTargetUID: nil)
+        return false
+    }
+
+    func setMusicAirPlayDevice(id: String, selected: Bool) async {
+        var ids = selectedMusicAirPlayDeviceIDs
+        if selected {
+            if !ids.contains(id) {
+                ids.append(id)
             }
+            await engine.clearOutputDevice()
+            UserDefaults.standard.removeObject(forKey: "engineOutputDeviceUID")
+        } else {
+            ids.removeAll { $0 == id }
+        }
+
+        selectedMusicAirPlayDeviceIDs = ids
+        UserDefaults.standard.set(ids, forKey: Self.musicAirPlayDeviceIDsKey)
+        await engine.setMusicAirPlayDeviceIDs(ids)
+        syncMusicAirPlayDeviceSelection()
+        refreshOutputDevices(engineTargetUID: nil)
+    }
+
+    func clearMusicAirPlaySelection() async {
+        guard !selectedMusicAirPlayDeviceIDs.isEmpty else { return }
+        selectedMusicAirPlayDeviceIDs = []
+        UserDefaults.standard.removeObject(forKey: Self.musicAirPlayDeviceIDsKey)
+        await engine.setMusicAirPlayDeviceIDs([])
+        syncMusicAirPlayDeviceSelection()
+    }
+
+    func clearPinnedOutputForSystemRouting() async {
+        await engine.clearOutputDevice()
+        UserDefaults.standard.removeObject(forKey: "engineOutputDeviceUID")
+        refreshOutputDevices(engineTargetUID: nil)
+    }
+
+    func refreshMusicAirPlayDevices() async {
+        do {
+            musicAirPlayDevices = try await musicController.devices()
+            if selectedMusicAirPlayDeviceIDs.isEmpty {
+                let migratedIDs = MusicAirPlaySelectionMigration.migratedDeviceIDs(
+                    fromLegacyIDs: Self.legacySelectedAirPlayDeviceIDs(),
+                    devices: musicAirPlayDevices
+                )
+                if !migratedIDs.isEmpty {
+                    selectedMusicAirPlayDeviceIDs = migratedIDs
+                    UserDefaults.standard.set(migratedIDs, forKey: Self.musicAirPlayDeviceIDsKey)
+                    await engine.setMusicAirPlayDeviceIDs(migratedIDs)
+                    UserDefaults.standard.removeObject(forKey: "engineOutputDeviceUID")
+                }
+            }
+            syncMusicAirPlayDeviceSelection()
+            musicAirPlayError = nil
+        } catch {
+            musicAirPlayError = error.localizedDescription
         }
     }
 
-    /// Toggles a single device for the Settings UI checkboxes.
-    func toggleSelection(_ device: AirPlayDevice) async {
-        let currentIDs = await engine.selectedDevices().map(\.id)
-        var newIDs = currentIDs
-        if let idx = newIDs.firstIndex(of: device.id) {
-            newIDs.remove(at: idx)
+    func refreshOutputDevices(engineTargetUID: String? = nil) {
+        let targetUID = engineTargetUID ?? UserDefaults.standard.string(forKey: "engineOutputDeviceUID")
+        let devices = AudioDeviceManager.allOutputDevices(engineTargetUID: targetUID)
+        outputDevices = devices
+
+        if !selectedMusicAirPlayDeviceIDs.isEmpty {
+            let names = musicAirPlayDevices
+                .filter { selectedMusicAirPlayDeviceIDs.contains($0.id) }
+                .map(\.name)
+            currentOutputName = names.isEmpty ? "Music AirPlay" : names.joined(separator: ", ")
+        } else if let targetUID, let target = devices.first(where: { $0.id == targetUID }) {
+            currentOutputName = target.name
+        } else if let currentDefault = devices.first(where: { $0.isSystemDefault }) {
+            currentOutputName = "\(currentDefault.name) (System Default)"
         } else {
-            if newIDs.count < 8 {
-                newIDs.append(device.id)
-            }
+            currentOutputName = "System Default"
         }
-        await setSelectedDevices(newIDs)
+    }
+
+    private func syncMusicAirPlayDeviceSelection() {
+        let selectedIDs = Set(selectedMusicAirPlayDeviceIDs)
+        musicAirPlayDevices = musicAirPlayDevices.map { device in
+            var copy = device
+            copy.selected = selectedIDs.contains(device.id)
+            return copy
+        }
+    }
+
+    private static func legacySelectedAirPlayDeviceIDs() -> [String] {
+        if let data = UserDefaults.standard.data(forKey: "selectedAirPlayDeviceIDs"),
+           let ids = try? JSONDecoder().decode([String].self, from: data) {
+            return ids
+        }
+        if let id = UserDefaults.standard.string(forKey: "selectedAirPlayDeviceID") {
+            return [id]
+        }
+        return []
     }
 }
 
@@ -167,19 +214,17 @@ extension AppState {
         guard serverTask == nil else { return }
         let engine = self.engine
         let queue = self.queue
-        let discovery = self.discovery
         let address = self.listenAddress
         let port = self.serverPort
         let authToken = self.authToken
 
         self.serverRunning = true
-        Task { await advertiser.start(port: UInt16(port)) }
+        Task { advertiser.start(port: UInt16(port)) }
         self.serverTask = Task.detached { [weak self] in
             do {
                 let app = try buildApplication(
                     engine: engine,
                     queue: queue,
-                    discovery: discovery,
                     appState: nil,
                     address: address,
                     port: port,
@@ -200,7 +245,7 @@ extension AppState {
     }
 
     func stopServer() async {
-        await advertiser.stop()
+        advertiser.stop()
         guard let task = serverTask else { return }
         Log.server.info("Stopping server")
         task.cancel()

@@ -1,38 +1,33 @@
+import AVFoundation
 import Foundation
 import os
 
-/// Playback is implemented on top of an `AirPlaySession` which — once Phases 2–5
-/// are complete — will stream audio directly to a HomePod over AirPlay 2. Phase 1
-/// holds the session skeleton; actual playback calls throw "not implemented" until
-/// the protocol stack lands.
+/// Plays queued local files through AVFoundation's player stack.
+///
+/// AirPlay/HomePod authentication is intentionally left to macOS. `AVPlayer`
+/// follows the OS-authenticated AirPlay route selected through
+/// `AVRoutePickerView` when `audioOutputDeviceUniqueID` is nil, and can also be
+/// pinned to a CoreAudio output UID when macOS exposes one.
 actor PlaybackEngine {
     private(set) var state: PlaybackState = .idle
 
-    private var sessions: [String: AirPlaySession] = [:]
-    private var order: [String] = []
-    private var deviceSnapshots: [String: AirPlayDevice] = [:]
-    private var statuses: [String: DeviceStatus] = [:]
-    private weak var discovery: BonjourDiscovery?
+    private let player: AVPlayer
+    private let musicController: any MusicAppControlling
+    private var playerItem: AVPlayerItem?
+    private var endObserver: NSObjectProtocol?
+    private var errorObserver: NSObjectProtocol?
+    private var currentDeviceUID: String?
+    private var selectedMusicAirPlayDeviceIDs: [String] = []
+    private var activeBackend: PlaybackBackend = .avPlayer
+    private var musicCompletionTask: Task<Void, Never>?
 
-    private var statusCallback: (@Sendable ([SelectedDevice]) -> Void)?
     private var stateCallback: (@Sendable (PlaybackState) -> Void)?
     private var trackFinishedCallback: (@Sendable () async -> Void)?
 
-    var sessionFactory: @Sendable () -> AirPlaySession = { AirPlaySession() }
-
-    init() {
-        // no longer initializes a single session
-    }
-
-    func setStatusCallback(_ callback: @escaping @Sendable ([SelectedDevice]) -> Void) {
-        self.statusCallback = callback
-    }
-
-    func selectedDevices() -> [SelectedDevice] {
-        return order.compactMap { id in
-            guard let snap = deviceSnapshots[id], let stat = statuses[id] else { return nil }
-            return SelectedDevice(id: id, displayName: snap.displayName, status: stat)
-        }
+    init(player: AVPlayer = AVPlayer(), musicController: any MusicAppControlling = MusicAppBridge()) {
+        self.player = player
+        self.musicController = musicController
+        self.player.allowsExternalPlayback = true
     }
 
     func setStateCallback(_ callback: @escaping @Sendable (PlaybackState) -> Void) {
@@ -43,209 +38,170 @@ actor PlaybackEngine {
         self.trackFinishedCallback = callback
     }
 
-    func attachDiscovery(_ d: BonjourDiscovery) {
-        self.discovery = d
+    // MARK: - Output Device
+
+    func setOutputDevice(uid: String) async throws -> Bool {
+        guard AudioDeviceManager.deviceID(forUID: uid) != nil else {
+            throw PlaybackEngineError.deviceNotFound(uid: uid)
+        }
+
+        let oldUID = currentDeviceUID
+        currentDeviceUID = uid
+        player.audioOutputDeviceUniqueID = uid
+
+        let hotSwapped = state.isPlaying && oldUID != nil && oldUID != uid
+        Log.output.info("Output device set to \(uid, privacy: .public), hot_swapped=\(hotSwapped)")
+        return hotSwapped
     }
 
-    // MARK: - Device selection
-
-    /// Point the engine at a discovered AirPlay device. Pass nil to clear.
-    func setDevice(_ device: AirPlayDevice?) async {
-        if let d = device {
-            await setSelectedDevices([d])
-        } else {
-            await setSelectedDevices([])
-        }
+    func clearOutputDevice() {
+        currentDeviceUID = nil
+        player.audioOutputDeviceUniqueID = nil
+        Log.output.info("Output device target cleared; using system default")
     }
 
-    var currentDevice: AirPlayDevice? {
-        get async {
-            guard let firstID = order.first else { return nil }
-            return deviceSnapshots[firstID]
-        }
+    var outputDeviceUID: String? { currentDeviceUID }
+
+    func setMusicAirPlayDeviceIDs(_ ids: [String]) {
+        selectedMusicAirPlayDeviceIDs = ids
     }
 
-    func setSelectedDevices(_ requested: [AirPlayDevice]) async {
-        let requestedIDs = requested.map { $0.id }
-        let currentIDs = Set(order)
-        let reqSet = Set(requestedIDs)
-
-        // 1. Calculate diff
-        let toRemove = currentIDs.subtracting(reqSet)
-        let toAdd = reqSet.subtracting(currentIDs)
-
-        // 2. Extract sessions to stop BEFORE modifying dictionaries
-        var sessionsToStop = toRemove.compactMap { sessions[$0] }
-
-        // 3. Synchronously mutate all actor state (No `await` here!)
-        for id in toRemove {
-            sessions.removeValue(forKey: id)
-            statuses.removeValue(forKey: id)
-            deviceSnapshots.removeValue(forKey: id)
-        }
-
-        order = requestedIDs
-
-        for d in requested {
-            if toAdd.contains(d.id) {
-                let session = sessionFactory()
-                sessions[d.id] = session
-                deviceSnapshots[d.id] = d
-                statuses[d.id] = .pairing
-
-                if let reason = d.unsupportedTargetReason {
-                    statuses[d.id] = .error(reason: reason)
-                    continue
-                }
-
-                if !d.supportsAirPlay2 {
-                    statuses[d.id] = .error(reason: "AirPlay 2 required")
-                    continue
-                }
-
-                let currentDiscovery = self.discovery
-
-                // Push ALL async actor messages into the connection Task
-                Task { [weak self, id = d.id, session] in
-                    if let currentDiscovery { await session.attachDiscovery(currentDiscovery) }
-                    await session.setDevice(d)
-
-                    do {
-                        try await session.connect()
-                        await self?.updateStatus(id: id, status: .ok, session: session)
-                    } catch {
-                        await self?.updateStatus(id: id, status: .error(reason: error.localizedDescription), session: session)
-                    }
-                }
-            } else if deviceSnapshots[d.id] != nil {
-                // Update displayNames for existing devices in case of rename
-                deviceSnapshots[d.id] = d
-                if let reason = d.unsupportedTargetReason {
-                    statuses[d.id] = .error(reason: reason)
-                    if let session = sessions.removeValue(forKey: d.id) {
-                        sessionsToStop.append(session)
-                    }
-                } else if !d.supportsAirPlay2 {
-                    statuses[d.id] = .error(reason: "AirPlay 2 required")
-                    if let session = sessions.removeValue(forKey: d.id) {
-                        sessionsToStop.append(session)
-                    }
-                }
-            }
-        }
-
-        // Fire callback to reflect new state immediately
-        fireStatusCallback()
-
-        // 4. Asynchronously stop old sessions now that internal state is completely settled
-        for session in sessionsToStop {
-            await session.stop()
-        }
-    }
-
-    private func updateStatus(id: String, status: DeviceStatus, session expectedSession: AirPlaySession? = nil) {
-        if let expectedSession, sessions[id] !== expectedSession {
-            return
-        }
-        if statuses[id] != nil {
-            statuses[id] = status
-            fireStatusCallback()
-        }
-    }
-
-    private func fireStatusCallback() {
-        let snap = selectedDevices()
-        statusCallback?(snap)
-    }
-
-    func markOffline(deviceID: String) {
-        if statuses[deviceID] != nil {
-            statuses[deviceID] = .offline
-            fireStatusCallback()
-        }
-    }
-
-    func retry(deviceID: String) {
-        guard let session = sessions[deviceID], let _ = deviceSnapshots[deviceID] else { return }
-        statuses[deviceID] = .pairing
-        fireStatusCallback()
-
-        Task { [weak self] in
-            do {
-                try await session.connect()
-                await self?.updateStatus(id: deviceID, status: .ok, session: session)
-            } catch {
-                await self?.updateStatus(id: deviceID, status: .error(reason: error.localizedDescription), session: session)
-            }
-        }
-    }
-
-    /// Legacy hook kept for API compatibility with earlier UID-based callers;
-    /// a no-op in the AirPlay architecture because routing is by Bonjour device,
-    /// not CoreAudio UID.
-    func setOutputDevice(uid: String) async throws -> Bool { false }
-    var outputDeviceUID: String? { nil }
+    var musicAirPlayDeviceIDs: [String] { selectedMusicAirPlayDeviceIDs }
 
     // MARK: - Playback
 
     func play(track: QueueTrack) async throws {
+        await stopInternal()
+
         let url = URL(fileURLWithPath: track.stagedPath)
-        var errors: [String: Error] = [:]
-        let attemptedIDs = order
-
-        await withTaskGroup(of: (String, Error?).self) { group in
-            for id in attemptedIDs {
-                guard let session = sessions[id] else { continue }
-                group.addTask {
-                    do { try await session.play(fileURL: url); return (id, nil) }
-                    catch { return (id, error) }
-                }
+        if currentDeviceUID == nil, !selectedMusicAirPlayDeviceIDs.isEmpty {
+            do {
+                try await musicController.play(fileURL: url, deviceIDs: selectedMusicAirPlayDeviceIDs)
+            } catch {
+                transition(to: .error(message: error.localizedDescription))
+                throw error
             }
-            for await (id, err) in group { if let err = err { errors[id] = err } }
-        }
-
-        // Prevent state overwrite if stop() was called during suspension
-        guard !Task.isCancelled else { return }
-        guard case .idle = state else { return }
-
-        if let first = errors.first, errors.count == attemptedIDs.count, !attemptedIDs.isEmpty {
-            let msg = "All devices failed; first=\(first.key): \(first.value.localizedDescription)"
-            transition(to: .error(message: msg))
-            throw first.value
-        } else {
+            activeBackend = .musicApp
+            scheduleMusicCompletion(for: url)
             transition(to: .playing(file: track.originalFilename))
-            Log.playback.info("Playing \(track.originalFilename, privacy: .public)")
+            Log.playback.info("Playing \(track.originalFilename, privacy: .public) through Music AirPlay devices")
+            return
         }
+
+        let item = AVPlayerItem(url: url)
+        if let currentDeviceUID {
+            player.audioOutputDeviceUniqueID = currentDeviceUID
+        }
+
+        let endObs = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { await self?.handlePlaybackFinished() }
+        }
+
+        let errorObs = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] notification in
+            let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            let message = error?.localizedDescription ?? "Unknown playback error"
+            Task { await self?.handlePlaybackError(message: message) }
+        }
+
+        playerItem = item
+        endObserver = endObs
+        errorObserver = errorObs
+
+        player.replaceCurrentItem(with: item)
+        player.play()
+        activeBackend = .avPlayer
+
+        transition(to: .playing(file: track.originalFilename))
+        Log.playback.info("Playing \(track.originalFilename, privacy: .public)")
     }
 
     func stop() async -> PlaybackState {
-        let sessionsToStop = order.compactMap { sessions[$0] }
-        await withTaskGroup(of: Void.self) { group in
-            for session in sessionsToStop {
-                group.addTask {
-                    await session.stop()
-                }
-            }
-        }
+        await stopInternal()
         transition(to: .idle)
         return state
     }
 
-    func pause() -> PlaybackState {
-        if case .playing(let file) = state {
-            transition(to: .paused(file: file))
+    func pause() async -> PlaybackState {
+        guard case .playing(let file) = state else { return state }
+        if activeBackend == .musicApp {
+            try? await musicController.pause()
+        } else {
+            player.pause()
         }
+        transition(to: .paused(file: file))
         return state
     }
 
-    func resume() -> PlaybackState {
-        if case .paused(let file) = state {
-            transition(to: .playing(file: file))
+    func resume() async -> PlaybackState {
+        guard case .paused(let file) = state else { return state }
+        if activeBackend == .musicApp {
+            try? await musicController.resume()
+        } else {
+            player.play()
         }
+        transition(to: .playing(file: file))
         return state
     }
 
     // MARK: - Private
+
+    private func stopInternal(sendStopToActiveBackend: Bool = true) async {
+        player.pause()
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+        }
+        if let errorObserver {
+            NotificationCenter.default.removeObserver(errorObserver)
+        }
+        musicCompletionTask?.cancel()
+        if sendStopToActiveBackend, activeBackend == .musicApp {
+            try? await musicController.stop()
+        }
+        playerItem = nil
+        endObserver = nil
+        errorObserver = nil
+        musicCompletionTask = nil
+        activeBackend = .avPlayer
+    }
+
+    private func handlePlaybackFinished() async {
+        guard state.isPlaying else { return }
+        await stopInternal(sendStopToActiveBackend: false)
+        transition(to: .idle)
+        Log.playback.info("Track finished")
+
+        if let cb = trackFinishedCallback {
+            Task { await cb() }
+        }
+    }
+
+    private func handlePlaybackError(message: String) async {
+        Log.playback.error("Playback error: \(message, privacy: .public)")
+        await stopInternal()
+        transition(to: .error(message: message))
+    }
+
+    private func scheduleMusicCompletion(for url: URL) {
+        musicCompletionTask?.cancel()
+        musicCompletionTask = Task { [weak self] in
+            let asset = AVURLAsset(url: url)
+            guard let duration = try? await asset.load(.duration) else { return }
+            let seconds = duration.seconds
+            guard seconds.isFinite, seconds > 0 else { return }
+            let delay = UInt64((seconds + 1.0) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            await self?.handlePlaybackFinished()
+        }
+    }
 
     private func transition(to newState: PlaybackState) {
         let oldState = state
@@ -255,6 +211,11 @@ actor PlaybackEngine {
             Task { @MainActor in cb(s) }
         }
     }
+}
+
+private enum PlaybackBackend {
+    case avPlayer
+    case musicApp
 }
 
 enum PlaybackEngineError: Error, Sendable {

@@ -148,26 +148,48 @@ struct AirPlayDeviceInfo: Codable, Sendable {
     let selected_order: Int?
 }
 
-struct OutputsResponse: Codable, Sendable {
-    let selected: AirPlayDeviceInfo?
-    let selected_devices: [SelectedDeviceInfo]
-    let devices: [AirPlayDeviceInfo]
+struct OutputsResponse: Encodable, Sendable {
+    let current_engine_target: String?
+    let current_system_default: String?
+    let current_airplay_route: String?
+    let devices: [AudioOutputDeviceInfo]
+
+    enum CodingKeys: String, CodingKey {
+        case current_engine_target
+        case current_system_default
+        case current_airplay_route
+        case devices
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(current_engine_target, forKey: .current_engine_target)
+        try container.encode(current_system_default, forKey: .current_system_default)
+        try container.encode(current_airplay_route, forKey: .current_airplay_route)
+        try container.encode(devices, forKey: .devices)
+    }
 }
 
-struct SelectedOutputsResponse: Codable, Sendable {
-    let max: Int
-    let devices: [SelectedDeviceInfo]
-}
-
-struct PutSelectedRequest: Codable, Sendable {
-    let ids: [String]
-}
-
-struct OutputCurrentResponse: Codable, Sendable {
+struct OutputCurrentResponse: Encodable, Sendable {
     let id: String
     let name: String
-    let model: String?
-    let supports_airplay_2: Bool
+    let transport: String
+    let hot_swapped: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case transport
+        case hot_swapped
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(transport, forKey: .transport)
+        try container.encode(hot_swapped, forKey: .hot_swapped)
+    }
 }
 
 struct StatusResponse: Codable, Sendable {
@@ -176,7 +198,6 @@ struct StatusResponse: Codable, Sendable {
     let queue_length: Int
     let queue_position: Int?
     let output: OutputInfo?
-    let outputs: [SelectedDeviceInfo]
     let error: String?
 
     struct TrackRef: Codable, Sendable {
@@ -185,7 +206,9 @@ struct StatusResponse: Codable, Sendable {
     }
 
     struct OutputInfo: Codable, Sendable {
-        let airplay_device_id: String?
-        let airplay_device_name: String?
+        let engine_target: String?
+        let engine_target_name: String?
+        let system_default: String?
+        let airplay_route: String?
     }
 }

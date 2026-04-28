@@ -26,5 +26,7 @@
     </array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>AirBridge discovers AirPlay devices on your local network to stream audio.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>AirBridge controls Music to play uploaded audio through multiple selected HomePods.</string>
 </dict>
 </plist>

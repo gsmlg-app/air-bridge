@@ -135,7 +135,7 @@ private final class StatusBarController: NSObject {
     private let openSettings: () -> Void
 
     init(appState: AppState, openSettings: @escaping () -> Void) {
-        self.statusItem = NSStatusBar.system.statusItem(withLength: 58)
+        self.statusItem = NSStatusBar.system.statusItem(withLength: StatusBarItemConfiguration.statusItemLength)
         self.popover = NSPopover()
         self.openSettings = openSettings
         super.init()
@@ -143,8 +143,8 @@ private final class StatusBarController: NSObject {
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "airplayaudio", accessibilityDescription: "AirBridge")
                 ?? NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "AirBridge")
-            button.imagePosition = .imageLeading
-            button.title = "AB"
+            button.imagePosition = StatusBarItemConfiguration.imagePosition
+            button.title = StatusBarItemConfiguration.buttonTitle
             button.target = self
             button.action = #selector(togglePopover)
         }
@@ -165,4 +165,10 @@ private final class StatusBarController: NSObject {
             popover.contentViewController?.view.window?.makeKey()
         }
     }
+}
+
+enum StatusBarItemConfiguration {
+    static let statusItemLength = NSStatusItem.squareLength
+    static let buttonTitle = ""
+    static let imagePosition: NSControl.ImagePosition = .imageOnly
 }

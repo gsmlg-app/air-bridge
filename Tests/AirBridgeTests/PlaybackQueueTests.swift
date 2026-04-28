@@ -42,6 +42,19 @@ struct PlaybackQueueTests {
         #expect(state.tracks.map(\.originalFilename) == ["a.mp3", "b.mp3", "c.mp3"])
     }
 
+    @Test func playNow_replacesQueueWithSingleCurrentTrack() async {
+        let queue = PlaybackQueue(engine: PlaybackEngine())
+        _ = await queue.enqueue(track: makeTrack(filename: "old-a.mp3"))
+        _ = await queue.enqueue(track: makeTrack(filename: "old-b.mp3"))
+
+        let immediate = makeTrack(filename: "now.mp3")
+        await queue.playNow(track: immediate)
+
+        let state = await queue.list()
+        #expect(state.tracks == [immediate])
+        #expect(state.currentIndex == 0)
+    }
+
     @Test func remove_deletesTrack() async {
         let queue = PlaybackQueue(engine: PlaybackEngine())
         let track = makeTrack()

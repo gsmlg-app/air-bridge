@@ -1,62 +1,130 @@
 import XCTest
+import AVFoundation
 @testable import AirBridge
 
-final class PlaybackEngineTests: XCTestCase {
-    func testInitialState() async {
-        let engine = PlaybackEngine()
-        let selected = await engine.selectedDevices()
-        XCTAssertTrue(selected.isEmpty)
-        let current = await engine.currentDevice
-        XCTAssertNil(current)
+actor MusicControllerSpy: MusicAppControlling {
+    private let playError: Error?
+    private var playRequests: [(URL, [String])] = []
+    private var stopCount = 0
+    private var pauseCount = 0
+    private var resumeCount = 0
+
+    init(playError: Error? = nil) {
+        self.playError = playError
     }
 
-    func testSetSelectedDevices() async {
-        let engine = PlaybackEngine()
-        let d1 = AirPlayDevice(id: "1", displayName: "One", serviceType: "_airplay._tcp.", txt: [:])
+    func devices() async throws -> [MusicAirPlayDevice] {
+        []
+    }
 
-        await engine.setSelectedDevices([d1])
-        let selected = await engine.selectedDevices()
-        XCTAssertEqual(selected.count, 1)
-        XCTAssertEqual(selected[0].id, "1")
-        // Since discovery is nil, connect() will fail immediately with .error
-        // Wait a tick for the detached task to finish
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        let updated = await engine.selectedDevices()
-        if case .error = updated[0].status {
-            // expected
-        } else {
-            XCTFail("Should have errored due to no discovery")
+    func play(fileURL: URL, deviceIDs: [String]) async throws {
+        if let playError {
+            throw playError
+        }
+        playRequests.append((fileURL, deviceIDs))
+    }
+
+    func stop() async throws {
+        stopCount += 1
+    }
+
+    func pause() async throws {
+        pauseCount += 1
+    }
+
+    func resume() async throws {
+        resumeCount += 1
+    }
+
+    func recordedPlayRequests() -> [(URL, [String])] {
+        playRequests
+    }
+}
+
+final class PlaybackEngineTests: XCTestCase {
+    func testInitialOutputDeviceUsesSystemDefault() async {
+        let engine = PlaybackEngine()
+
+        let outputUID = await engine.outputDeviceUID
+
+        XCTAssertNil(outputUID)
+    }
+
+    func testSetOutputDeviceRejectsUnknownCoreAudioUID() async {
+        let engine = PlaybackEngine()
+
+        do {
+            _ = try await engine.setOutputDevice(uid: "missing-coreaudio-device")
+            XCTFail("Expected unknown CoreAudio UID to be rejected")
+        } catch PlaybackEngineError.deviceNotFound(let uid) {
+            XCTAssertEqual(uid, "missing-coreaudio-device")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
         }
     }
 
-    func testOfflineAndRetry() async {
+    func testClearOutputDeviceReturnsToSystemDefault() async {
         let engine = PlaybackEngine()
-        let d1 = AirPlayDevice(id: "1", displayName: "One", serviceType: "_airplay._tcp.", txt: [:])
-        await engine.setSelectedDevices([d1])
-        await engine.markOffline(deviceID: "1")
-        
-        let offlineSnap = await engine.selectedDevices()
-        XCTAssertEqual(offlineSnap[0].status, .offline)
-        
-        await engine.retry(deviceID: "1")
-        let retrySnap = await engine.selectedDevices()
-        XCTAssertEqual(retrySnap[0].status, .pairing)
+
+        await engine.clearOutputDevice()
+
+        let outputUID = await engine.outputDeviceUID
+        XCTAssertNil(outputUID)
     }
 
-    func testExistingSelectionUpdatesToUnsupportedWhenModelArrives() async {
-        let engine = PlaybackEngine()
-        let stub = AirPlayDevice(id: "1", displayName: "One", serviceType: "_airplay._tcp.", txt: [:])
-        let mac = AirPlayDevice(id: "1", displayName: "One", serviceType: "_airplay._tcp.", txt: ["model": "Mac16,12"])
+    func testSetOutputDeviceUpdatesInjectedPlayer() async throws {
+        let defaultID = AudioDeviceManager.getDefaultOutputDeviceID()
+        guard let defaultUID = AudioDeviceManager.deviceUID(for: defaultID) else {
+            throw XCTSkip("No CoreAudio default output UID available")
+        }
+        let player = AVPlayer()
+        let engine = PlaybackEngine(player: player)
 
-        await engine.setSelectedDevices([stub])
-        await engine.markOffline(deviceID: "1")
-        await engine.setSelectedDevices([mac])
+        _ = try await engine.setOutputDevice(uid: defaultUID)
 
-        let selected = await engine.selectedDevices()
-        XCTAssertEqual(selected.count, 1)
-        XCTAssertEqual(
-            selected[0].status,
-            .error(reason: "Mac AirPlay Receiver is not supported. Select a HomePod or Apple TV.")
+        XCTAssertEqual(player.audioOutputDeviceUniqueID, defaultUID)
+    }
+
+    func testPlayUsesMusicControllerForAllSelectedHomePods() async throws {
+        let musicController = MusicControllerSpy()
+        let engine = PlaybackEngine(player: AVPlayer(), musicController: musicController)
+        await engine.setMusicAirPlayDeviceIDs(["bedroom-id", "electrical-center-id"])
+        let track = QueueTrack(
+            id: UUID(),
+            originalFilename: "voice.mp3",
+            stagedPath: "/tmp/voice.mp3",
+            addedAt: Date(),
+            mimeType: "audio/mpeg"
         )
+
+        try await engine.play(track: track)
+
+        let requests = await musicController.recordedPlayRequests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.0.path, "/tmp/voice.mp3")
+        XCTAssertEqual(requests.first?.1, ["bedroom-id", "electrical-center-id"])
+    }
+
+    func testMusicPlaybackFailureTransitionsToError() async throws {
+        let musicController = MusicControllerSpy(playError: MusicAppBridgeError.noSelectedDevices)
+        let engine = PlaybackEngine(player: AVPlayer(), musicController: musicController)
+        await engine.setMusicAirPlayDeviceIDs(["missing-homepod"])
+        let track = QueueTrack(
+            id: UUID(),
+            originalFilename: "voice.mp3",
+            stagedPath: "/tmp/voice.mp3",
+            addedAt: Date(),
+            mimeType: "audio/mpeg"
+        )
+
+        do {
+            try await engine.play(track: track)
+            XCTFail("Expected Music playback failure")
+        } catch MusicAppBridgeError.noSelectedDevices {
+            let state = await engine.state
+            XCTAssertEqual(state, .error(message: MusicAppBridgeError.noSelectedDevices.localizedDescription))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 }
