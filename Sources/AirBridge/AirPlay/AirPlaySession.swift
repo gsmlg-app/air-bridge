@@ -53,7 +53,7 @@ actor AirPlaySession {
             log.info("HAP pair-setup ok for \(device.displayName, privacy: .public)")
         } catch let pairingError as HAPPairing.PairingError {
             log.error("HAP pairing failed: \(String(describing: pairingError), privacy: .public)")
-            throw AirPlayError.protocolError("pairing failed: \(pairingError)")
+            throw AirPlayError.protocolError("pairing failed: \(pairingError.localizedDescription)")
         }
     }
 

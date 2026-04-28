@@ -33,13 +33,37 @@ struct HAPSessionKeys: Sendable {
 actor HAPPairing {
     private let log = Logger(subsystem: "com.gsmlg.airbridge", category: "hap")
 
-    enum PairingError: Error {
+    enum PairingError: Error, CustomStringConvertible, LocalizedError {
         case connectionFailed(String)
         case httpError(Int, String)
         case malformedResponse(String)
         case accessoryError(HAPTLV8.HAPError)
         case srpFailed(String)
         case unexpectedState(UInt8)
+
+        var description: String {
+            switch self {
+            case .connectionFailed(let message):
+                return "connection failed: \(message)"
+            case .httpError(let status, let body):
+                if status == 403 {
+                    return "HTTP 403 Forbidden from AirPlay receiver; pairing is disabled or this receiver rejected AirBridge"
+                }
+                return "HTTP \(status): \(body)"
+            case .malformedResponse(let message):
+                return "malformed response: \(message)"
+            case .accessoryError(let error):
+                return "accessory error: \(error.localizedDescription)"
+            case .srpFailed(let message):
+                return "SRP failed: \(message)"
+            case .unexpectedState(let state):
+                return "unexpected HAP state \(state)"
+            }
+        }
+
+        var errorDescription: String? {
+            description
+        }
     }
 
     private let endpoint: NWEndpoint

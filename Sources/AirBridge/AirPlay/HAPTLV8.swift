@@ -38,7 +38,7 @@ enum HAPTLV8 {
     }
 
     /// Error codes returned in TLVType.error.
-    enum HAPError: UInt8, Error {
+    enum HAPError: UInt8, Error, CustomStringConvertible, LocalizedError {
         case unknown = 0x01
         case authentication = 0x02
         case backoff = 0x03
@@ -46,6 +46,29 @@ enum HAPTLV8 {
         case maxTries = 0x05
         case unavailable = 0x06
         case busy = 0x07
+
+        var description: String {
+            switch self {
+            case .unknown:
+                return "unknown"
+            case .authentication:
+                return "authentication failed"
+            case .backoff:
+                return "accessory requested backoff; wait before retrying"
+            case .maxPeers:
+                return "accessory has reached its pairing limit"
+            case .maxTries:
+                return "too many pairing attempts"
+            case .unavailable:
+                return "accessory is unavailable"
+            case .busy:
+                return "accessory is busy"
+            }
+        }
+
+        var errorDescription: String? {
+            description
+        }
     }
 
     /// Encode a sequence of (type, value) pairs into TLV8 bytes. Values longer

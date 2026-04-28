@@ -30,6 +30,19 @@ struct AirPlayDevice: Identifiable, Sendable, Hashable, Codable {
         supportsAirPlay2
     }
 
+    /// macOS AirPlay Receiver advertises as a Mac model (for example Mac16,12)
+    /// but rejects AirBridge's direct AirPlay pairing path.
+    var unsupportedTargetReason: String? {
+        if modelID?.hasPrefix("Mac") == true {
+            return "Mac AirPlay Receiver is not supported. Select a HomePod or Apple TV."
+        }
+        return nil
+    }
+
+    var isSupportedTarget: Bool {
+        unsupportedTargetReason == nil
+    }
+
     /// Model identifier from TXT `md` or `model`.
     var modelID: String? {
         txt["md"] ?? txt["model"]

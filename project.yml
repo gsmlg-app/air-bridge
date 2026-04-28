@@ -42,12 +42,13 @@ targets:
       - Resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.gsmlg.airbridge
+        PRODUCT_BUNDLE_IDENTIFIER: app.gsmlg.airbridge
         MARKETING_VERSION: "1.0.0"
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: Resources/Info.plist
         CODE_SIGN_ENTITLEMENTS: AirBridge.entitlements
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: S9A97JZ7MQ
         GENERATE_INFOPLIST_FILE: false
         ENABLE_HARDENED_RUNTIME: true
         COMBINE_HIDPI_IMAGES: true
@@ -62,11 +63,14 @@ targets:
     type: bundle.unit-test
     platform: macOS
     sources:
-      - Tests/AirBridgeTests
+      - path: Tests/AirBridgeTests
+        excludes:
+          - APIRoutesTests.swift
     settings:
       base:
         GENERATE_INFOPLIST_FILE: true
+        PRODUCT_BUNDLE_IDENTIFIER: app.gsmlg.airbridge.tests
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: S9A97JZ7MQ
     dependencies:
       - target: AirBridge
-      - package: Hummingbird
-        product: HummingbirdTesting

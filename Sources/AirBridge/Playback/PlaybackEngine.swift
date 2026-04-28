@@ -75,7 +75,7 @@ actor PlaybackEngine {
         let toAdd = reqSet.subtracting(currentIDs)
 
         // 2. Extract sessions to stop BEFORE modifying dictionaries
-        let sessionsToStop = toRemove.compactMap { sessions[$0] }
+        var sessionsToStop = toRemove.compactMap { sessions[$0] }
 
         // 3. Synchronously mutate all actor state (No `await` here!)
         for id in toRemove {
@@ -93,6 +93,11 @@ actor PlaybackEngine {
                 deviceSnapshots[d.id] = d
                 statuses[d.id] = .pairing
 
+                if let reason = d.unsupportedTargetReason {
+                    statuses[d.id] = .error(reason: reason)
+                    continue
+                }
+
                 if !d.supportsAirPlay2 {
                     statuses[d.id] = .error(reason: "AirPlay 2 required")
                     continue
@@ -107,14 +112,25 @@ actor PlaybackEngine {
 
                     do {
                         try await session.connect()
-                        await self?.updateStatus(id: id, status: .ok)
+                        await self?.updateStatus(id: id, status: .ok, session: session)
                     } catch {
-                        await self?.updateStatus(id: id, status: .error(reason: error.localizedDescription))
+                        await self?.updateStatus(id: id, status: .error(reason: error.localizedDescription), session: session)
                     }
                 }
             } else if deviceSnapshots[d.id] != nil {
                 // Update displayNames for existing devices in case of rename
                 deviceSnapshots[d.id] = d
+                if let reason = d.unsupportedTargetReason {
+                    statuses[d.id] = .error(reason: reason)
+                    if let session = sessions.removeValue(forKey: d.id) {
+                        sessionsToStop.append(session)
+                    }
+                } else if !d.supportsAirPlay2 {
+                    statuses[d.id] = .error(reason: "AirPlay 2 required")
+                    if let session = sessions.removeValue(forKey: d.id) {
+                        sessionsToStop.append(session)
+                    }
+                }
             }
         }
 
@@ -127,7 +143,10 @@ actor PlaybackEngine {
         }
     }
 
-    private func updateStatus(id: String, status: DeviceStatus) {
+    private func updateStatus(id: String, status: DeviceStatus, session expectedSession: AirPlaySession? = nil) {
+        if let expectedSession, sessions[id] !== expectedSession {
+            return
+        }
         if statuses[id] != nil {
             statuses[id] = status
             fireStatusCallback()
@@ -154,9 +173,9 @@ actor PlaybackEngine {
         Task { [weak self] in
             do {
                 try await session.connect()
-                await self?.updateStatus(id: deviceID, status: .ok)
+                await self?.updateStatus(id: deviceID, status: .ok, session: session)
             } catch {
-                await self?.updateStatus(id: deviceID, status: .error(reason: error.localizedDescription))
+                await self?.updateStatus(id: deviceID, status: .error(reason: error.localizedDescription), session: session)
             }
         }
     }

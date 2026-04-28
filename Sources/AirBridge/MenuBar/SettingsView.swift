@@ -30,7 +30,8 @@ struct SettingsView: View {
                             let device = appState.airplayDevices.first(where: { $0.id == id }) ?? AirPlayDevice(id: id, displayName: id, serviceType: "", txt: [:])
                             let isSelected = appState.selectedDevices.contains(where: { $0.id == id })
                             let isAtLimit = appState.selectedDevices.count >= 8
-                            let isDisabled = !isSelected && isAtLimit
+                            let unsupportedReason = device.unsupportedTargetReason
+                            let isDisabled = !isSelected && (isAtLimit || unsupportedReason != nil)
 
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack(spacing: 6) {
@@ -43,11 +44,14 @@ struct SettingsView: View {
                                             if device.supportsAirPlay2 {
                                                 Text("AirPlay 2").font(.caption2).padding(.horizontal, 4).background(Color.blue.opacity(0.2)).cornerRadius(3)
                                             }
+                                            if unsupportedReason != nil {
+                                                Text("Unsupported").font(.caption2).padding(.horizontal, 4).background(Color.gray.opacity(0.18)).cornerRadius(3)
+                                            }
                                         }
                                     }
                                     .toggleStyle(.checkbox)
                                     .disabled(isDisabled)
-                                    .help(isDisabled ? "Max 8 devices selected." : "")
+                                    .help(unsupportedReason ?? (isDisabled ? "Max 8 devices selected." : ""))
 
                                     Spacer()
 
@@ -70,14 +74,21 @@ struct SettingsView: View {
                                 if let sel = appState.selectedDevices.first(where: { $0.id == id }), case .error(let reason) = sel.status {
                                     HStack {
                                         Text("└ \(reason)").font(.caption).foregroundColor(.secondary)
-                                        Button("Retry") {
-                                            Task { await appState.engine.retry(deviceID: id) }
+                                        if device.isSupportedTarget {
+                                            Button("Retry") {
+                                                Task { await appState.engine.retry(deviceID: id) }
+                                            }
+                                            .buttonStyle(.borderless)
+                                            .font(.caption)
+                                            .foregroundColor(.blue)
                                         }
-                                        .buttonStyle(.borderless)
-                                        .font(.caption)
-                                        .foregroundColor(.blue)
                                     }
                                     .padding(.leading, 24)
+                                } else if let unsupportedReason {
+                                    Text("└ \(unsupportedReason)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .padding(.leading, 24)
                                 }
                             }
                         }
@@ -92,6 +103,15 @@ struct SettingsView: View {
                     Text("\(appState.airplayDevices.count) device(s) found")
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                }
+
+                HStack(spacing: 8) {
+                    RoutePickerWrapper()
+                        .frame(width: 28, height: 24)
+                    Text("System AirPlay picker")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
                 }
             }
 
@@ -135,10 +155,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 520)
-        .onDisappear {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        .frame(width: 420, height: 560)
     }
 
     private func binding(for device: AirPlayDevice) -> Binding<Bool> {

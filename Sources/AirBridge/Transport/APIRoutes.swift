@@ -283,6 +283,8 @@ func buildRouter(
                 model: d.modelID,
                 supports_airplay_2: d.supportsAirPlay2,
                 requires_pairing: d.requiresPairing,
+                is_supported_target: d.isSupportedTarget,
+                unsupported_reason: d.unsupportedTargetReason,
                 is_selected: order != nil,
                 selected_order: order
             )

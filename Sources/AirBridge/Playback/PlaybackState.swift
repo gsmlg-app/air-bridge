@@ -142,6 +142,8 @@ struct AirPlayDeviceInfo: Codable, Sendable {
     let model: String?
     let supports_airplay_2: Bool
     let requires_pairing: Bool
+    let is_supported_target: Bool
+    let unsupported_reason: String?
     let is_selected: Bool
     let selected_order: Int?
 }

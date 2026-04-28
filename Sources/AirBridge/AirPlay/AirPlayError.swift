@@ -1,6 +1,6 @@
 import Foundation
 
-enum AirPlayError: Error, Sendable, CustomStringConvertible {
+enum AirPlayError: Error, Sendable, CustomStringConvertible, LocalizedError {
     enum Phase: String, Sendable {
         case pairing
         case rtsp
@@ -27,5 +27,9 @@ enum AirPlayError: Error, Sendable, CustomStringConvertible {
         case .protocolError(let message):
             return "AirPlay protocol error: \(message)"
         }
+    }
+
+    var errorDescription: String? {
+        description
     }
 }

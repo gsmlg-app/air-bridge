@@ -42,4 +42,21 @@ final class PlaybackEngineTests: XCTestCase {
         let retrySnap = await engine.selectedDevices()
         XCTAssertEqual(retrySnap[0].status, .pairing)
     }
+
+    func testExistingSelectionUpdatesToUnsupportedWhenModelArrives() async {
+        let engine = PlaybackEngine()
+        let stub = AirPlayDevice(id: "1", displayName: "One", serviceType: "_airplay._tcp.", txt: [:])
+        let mac = AirPlayDevice(id: "1", displayName: "One", serviceType: "_airplay._tcp.", txt: ["model": "Mac16,12"])
+
+        await engine.setSelectedDevices([stub])
+        await engine.markOffline(deviceID: "1")
+        await engine.setSelectedDevices([mac])
+
+        let selected = await engine.selectedDevices()
+        XCTAssertEqual(selected.count, 1)
+        XCTAssertEqual(
+            selected[0].status,
+            .error(reason: "Mac AirPlay Receiver is not supported. Select a HomePod or Apple TV.")
+        )
+    }
 }

@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     @ObservedObject var appState: AppState
+    var openSettingsAction: (() -> Void)?
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
@@ -82,9 +83,13 @@ struct MenuBarView: View {
 
             HStack {
                 Button("Settings…") {
-                    NSApp.setActivationPolicy(.regular)
-                    NSApp.activate(ignoringOtherApps: true)
-                    openSettings()
+                    if let openSettingsAction {
+                        openSettingsAction()
+                    } else {
+                        NSApp.setActivationPolicy(.regular)
+                        NSApp.activate(ignoringOtherApps: true)
+                        openSettings()
+                    }
                 }
 
                 Spacer()
