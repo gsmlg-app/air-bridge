@@ -76,17 +76,17 @@ func buildRouter(
 
             let ext = (upload.filename as NSString).pathExtension.lowercased()
             guard AudioValidator.supportedExtensions.contains(ext) else {
+                FileStaging.remove(url: upload.url)
                 return try jsonResponse(
                     ErrorResponse(error: "unsupported_format", message: "Unsupported format: \(ext)"),
                     status: .badRequest
                 )
             }
 
-            let (url, id) = try FileStaging.stage(data: upload.data, filename: upload.filename)
             let track = QueueTrack(
-                id: id,
+                id: upload.id,
                 originalFilename: upload.filename,
-                stagedPath: url.path,
+                stagedPath: upload.url.path,
                 addedAt: Date(),
                 mimeType: upload.contentType
             )
@@ -95,15 +95,15 @@ func buildRouter(
             let queueState = await queue.list()
 
             return try jsonResponse(EnqueueResponse(
-                id: id.uuidString,
+                id: upload.id.uuidString,
                 filename: upload.filename,
                 position: position,
                 queue_length: queueState.tracks.count
             ))
         } catch let error as MultipartUploadError {
             return try jsonResponse(
-                ErrorResponse(error: error.errorCode, message: "\(error)"),
-                status: .badRequest
+                ErrorResponse(error: error.errorCode, message: error.message),
+                status: error.responseStatus
             )
         }
     }
@@ -115,17 +115,17 @@ func buildRouter(
 
             let ext = (upload.filename as NSString).pathExtension.lowercased()
             guard AudioValidator.supportedExtensions.contains(ext) else {
+                FileStaging.remove(url: upload.url)
                 return try jsonResponse(
                     ErrorResponse(error: "unsupported_format", message: "Unsupported format: \(ext)"),
                     status: .badRequest
                 )
             }
 
-            let (url, id) = try FileStaging.stage(data: upload.data, filename: upload.filename)
             let track = QueueTrack(
-                id: id,
+                id: upload.id,
                 originalFilename: upload.filename,
-                stagedPath: url.path,
+                stagedPath: upload.url.path,
                 addedAt: Date(),
                 mimeType: upload.contentType
             )
@@ -134,15 +134,15 @@ func buildRouter(
             let queueState = await queue.list()
 
             return try jsonResponse(PlayNowResponse(
-                id: id.uuidString,
+                id: upload.id.uuidString,
                 filename: upload.filename,
                 status: "playing",
                 queue_length: queueState.tracks.count
             ))
         } catch let error as MultipartUploadError {
             return try jsonResponse(
-                ErrorResponse(error: error.errorCode, message: "\(error)"),
-                status: .badRequest
+                ErrorResponse(error: error.errorCode, message: error.message),
+                status: error.responseStatus
             )
         }
     }

@@ -10,11 +10,19 @@ enum FileStaging {
         return dir
     }
 
-    static func stage(data: Data, filename: String) throws -> (URL, UUID) {
+    static func reserve(filename: String) throws -> (url: URL, id: UUID) {
         let id = UUID()
         let ext = (filename as NSString).pathExtension
         let name = ext.isEmpty ? id.uuidString : "\(id.uuidString).\(ext)"
         let url = directory.appendingPathComponent(name)
+        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return (url, id)
+    }
+
+    static func stage(data: Data, filename: String) throws -> (URL, UUID) {
+        let (url, id) = try reserve(filename: filename)
         try data.write(to: url)
         Log.queue.info("Staged \(filename, privacy: .public) → \(url.lastPathComponent, privacy: .public)")
         return (url, id)

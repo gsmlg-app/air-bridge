@@ -1,6 +1,7 @@
 import Foundation
 import Hummingbird
 import HummingbirdTesting
+import NIOCore
 import Testing
 @testable import AirBridge
 
@@ -116,6 +117,55 @@ struct APIRoutesTests {
                 headers: [.authorization: "Bearer wrong"]
             ) { response in
                 #expect(response.status == .unauthorized)
+            }
+        }
+    }
+
+    @Test func queueEndpoint_oversizedMultipartMetadataReturnsContentTooLarge() async throws {
+        let boundary = "AirBridgeRouteMetadataBoundary"
+        var body = Data()
+        body.append(Data("--\(boundary)\r\n".utf8))
+        body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"metadata.txt\"\r\n".utf8))
+        body.append(Data("X-AirBridge-Metadata: \(String(repeating: "x", count: 17 * 1024))\r\n\r\n".utf8))
+        body.append(Data([0x01]))
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        let requestBody = body
+
+        let app = try buildTestApplication(engine: PlaybackEngine())
+        try await app.test(.live) { client in
+            try await client.execute(
+                uri: "/queue",
+                method: .post,
+                headers: [.contentType: "multipart/form-data; boundary=\(boundary)"],
+                body: ByteBuffer(data: requestBody)
+            ) { response in
+                #expect(response.status == .contentTooLarge)
+                let responseBody = String(buffer: response.body)
+                #expect(responseBody.contains("\"error\":\"multipart_metadata_too_large\""))
+                #expect(responseBody.contains("Multipart metadata exceeds"))
+            }
+        }
+    }
+
+    @Test func queueEndpoint_malformedMultipartReturnsBadRequest() async throws {
+        let boundary = "AirBridgeRouteMalformedBoundary"
+        var body = Data("--\(boundary)\r\n".utf8)
+        body.append(Data("Invalid Header: value\r\n\r\n".utf8))
+        body.append(Data([0x01]))
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        let requestBody = body
+
+        let app = try buildTestApplication(engine: PlaybackEngine())
+        try await app.test(.live) { client in
+            try await client.execute(
+                uri: "/queue",
+                method: .post,
+                headers: [.contentType: "multipart/form-data; boundary=\(boundary)"],
+                body: ByteBuffer(data: requestBody)
+            ) { response in
+                #expect(response.status == .badRequest)
+                let responseBody = String(buffer: response.body)
+                #expect(responseBody.contains("\"error\":\"malformed_multipart\""))
             }
         }
     }
