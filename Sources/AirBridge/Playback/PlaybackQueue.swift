@@ -4,16 +4,11 @@ import os
 actor PlaybackQueue {
     private var state = QueueState()
     private let engine: PlaybackEngine
+    private var didInstallTrackFinishedCallback = false
+    private(set) var activePlaybackToken: UUID?
 
     init(engine: PlaybackEngine) {
         self.engine = engine
-
-        Task {
-            await engine.setTrackFinishedCallback { [weak self] in
-                guard let self else { return }
-                await self.advanceToNext()
-            }
-        }
     }
 
     func enqueue(track: QueueTrack) async -> (id: UUID, position: Int) {
@@ -24,7 +19,7 @@ actor PlaybackQueue {
         // Auto-start if queue was idle
         if state.currentIndex == nil {
             state.currentIndex = 0
-            await playCurrentTrack()
+            _ = await playCurrentTrack()
         }
 
         return (track.id, position)
@@ -35,7 +30,7 @@ actor PlaybackQueue {
         state.tracks = [track]
         state.currentIndex = 0
         Log.queue.info("Play now: '\(track.originalFilename, privacy: .public)' as the only queue item")
-        await playCurrentTrack()
+        _ = await playCurrentTrack()
 
         for replacedTrack in replacedTracks where replacedTrack.stagedPath != track.stagedPath {
             FileStaging.remove(url: URL(fileURLWithPath: replacedTrack.stagedPath))
@@ -58,12 +53,13 @@ actor PlaybackQueue {
             if idx < current {
                 state.currentIndex = current - 1
             } else if isCurrentTrack {
+                activePlaybackToken = nil
                 _ = await engine.stop()
                 if state.tracks.isEmpty {
                     state.currentIndex = nil
                 } else {
                     state.currentIndex = min(current, state.tracks.count - 1)
-                    await playCurrentTrack()
+                    _ = await playCurrentTrack()
                 }
             }
         }
@@ -93,6 +89,7 @@ actor PlaybackQueue {
     }
 
     func clear() async {
+        activePlaybackToken = nil
         _ = await engine.stop()
         for track in state.tracks {
             FileStaging.remove(url: URL(fileURLWithPath: track.stagedPath))
@@ -106,7 +103,10 @@ actor PlaybackQueue {
             return nil
         }
         state.currentIndex = current + 1
-        await playCurrentTrack()
+        let didStart = await playCurrentTrack()
+        if didStart {
+            pruneCompletedHistory()
+        }
         return state.currentTrack
     }
 
@@ -116,7 +116,7 @@ actor PlaybackQueue {
             state.currentIndex = current - 1
         }
         // At position 0, restart current track
-        await playCurrentTrack()
+        _ = await playCurrentTrack()
         return state.currentTrack
     }
 
@@ -126,24 +126,93 @@ actor PlaybackQueue {
 
     // MARK: - Private
 
+    func handleTrackFinished(token: UUID) async {
+        guard activePlaybackToken == token else { return }
+        activePlaybackToken = nil
+        await advanceToNext()
+    }
+
     private func advanceToNext() async {
         guard let current = state.currentIndex else { return }
         let nextIdx = current + 1
         if nextIdx < state.tracks.count {
             state.currentIndex = nextIdx
-            await playCurrentTrack()
+            let didStart = await playCurrentTrack()
+            if didStart {
+                pruneCompletedHistory()
+            }
         } else {
-            state.currentIndex = nil
-            Log.queue.info("Queue exhausted")
+            await finishExhaustedQueue()
         }
     }
 
-    private func playCurrentTrack() async {
-        guard let track = state.currentTrack else { return }
-        do {
-            try await engine.play(track: track)
-        } catch {
-            Log.playback.error("Failed to play '\(track.originalFilename, privacy: .public)': \(error)")
+    private func playCurrentTrack() async -> Bool {
+        await ensureTrackFinishedCallbackInstalled()
+
+        while let track = state.currentTrack {
+            let token = UUID()
+            activePlaybackToken = token
+            do {
+                try await engine.play(track: track, token: token)
+                guard activePlaybackToken == token,
+                      state.currentTrack?.id == track.id else {
+                    return false
+                }
+                return true
+            } catch {
+                Log.playback.error("Failed to play '\(track.originalFilename, privacy: .public)': \(error)")
+
+                guard activePlaybackToken == token,
+                      state.currentTrack?.id == track.id,
+                      let failedIndex = state.currentIndex else {
+                    return false
+                }
+                activePlaybackToken = nil
+
+                state.tracks.remove(at: failedIndex)
+                FileStaging.remove(url: URL(fileURLWithPath: track.stagedPath))
+
+                if state.tracks.indices.contains(failedIndex) {
+                    state.currentIndex = failedIndex
+                } else {
+                    await finishExhaustedQueue()
+                    return false
+                }
+            }
+        }
+        return false
+    }
+
+    private func pruneCompletedHistory() {
+        guard let currentIndex = state.currentIndex else { return }
+        let removalCount = max(0, currentIndex - 1)
+        guard removalCount > 0 else { return }
+
+        let removedTracks = Array(state.tracks.prefix(removalCount))
+        state.tracks.removeFirst(removalCount)
+        state.currentIndex = currentIndex - removalCount
+        for track in removedTracks {
+            FileStaging.remove(url: URL(fileURLWithPath: track.stagedPath))
+        }
+    }
+
+    private func finishExhaustedQueue() async {
+        let exhaustedTracks = state.tracks
+        activePlaybackToken = nil
+        state = QueueState()
+        for track in exhaustedTracks {
+            FileStaging.remove(url: URL(fileURLWithPath: track.stagedPath))
+        }
+        await engine.resetPlaybackError()
+        Log.queue.info("Queue exhausted and cleared")
+    }
+
+    private func ensureTrackFinishedCallbackInstalled() async {
+        guard !didInstallTrackFinishedCallback else { return }
+        didInstallTrackFinishedCallback = true
+        await engine.setTrackFinishedCallback { [weak self] token in
+            guard let self else { return }
+            await self.handleTrackFinished(token: token)
         }
     }
 }

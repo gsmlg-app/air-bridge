@@ -20,13 +20,33 @@ actor PlaybackEngine {
     private var selectedMusicAirPlayDeviceIDs: [String] = []
     private var activeBackend: PlaybackBackend = .avPlayer
     private var musicCompletionTask: Task<Void, Never>?
+    private var playbackStallWatchdogTask: Task<Void, Never>?
+    private var lastPlaybackProgressSeconds: TimeInterval = 0
+    private var lastPlaybackProgressAt = Date()
+    private var activePlaybackToken: UUID?
 
     private var stateCallback: (@Sendable (PlaybackState) -> Void)?
-    private var trackFinishedCallback: (@Sendable () async -> Void)?
+    private var trackFinishedCallback: (@Sendable (UUID) async -> Void)?
 
-    init(player: AVPlayer = AVPlayer(), musicController: any MusicAppControlling = MusicAppBridge()) {
+    private let stalledPlaybackTimeout: TimeInterval
+    private let stalledPlaybackCheckInterval: TimeInterval
+    private let playbackTimeProvider: (AVPlayer) -> TimeInterval
+
+    init(
+        player: AVPlayer = AVPlayer(),
+        musicController: any MusicAppControlling = MusicAppBridge(),
+        stalledPlaybackTimeout: TimeInterval = 15,
+        stalledPlaybackCheckInterval: TimeInterval = 2,
+        playbackTimeProvider: @escaping (AVPlayer) -> TimeInterval = { player in
+            let seconds = player.currentTime().seconds
+            return seconds.isFinite ? seconds : 0
+        }
+    ) {
         self.player = player
         self.musicController = musicController
+        self.stalledPlaybackTimeout = stalledPlaybackTimeout
+        self.stalledPlaybackCheckInterval = stalledPlaybackCheckInterval
+        self.playbackTimeProvider = playbackTimeProvider
         self.player.allowsExternalPlayback = true
     }
 
@@ -34,7 +54,7 @@ actor PlaybackEngine {
         self.stateCallback = callback
     }
 
-    func setTrackFinishedCallback(_ callback: @escaping @Sendable () async -> Void) {
+    func setTrackFinishedCallback(_ callback: @escaping @Sendable (UUID) async -> Void) {
         self.trackFinishedCallback = callback
     }
 
@@ -70,19 +90,23 @@ actor PlaybackEngine {
 
     // MARK: - Playback
 
-    func play(track: QueueTrack) async throws {
+    func play(track: QueueTrack, token: UUID = UUID()) async throws {
         await stopInternal()
+        activePlaybackToken = token
 
         let url = URL(fileURLWithPath: track.stagedPath)
         if currentDeviceUID == nil, !selectedMusicAirPlayDeviceIDs.isEmpty {
             do {
                 try await musicController.play(fileURL: url, deviceIDs: selectedMusicAirPlayDeviceIDs)
             } catch {
+                guard activePlaybackToken == token else { throw error }
+                activePlaybackToken = nil
                 transition(to: .error(message: error.localizedDescription))
                 throw error
             }
+            guard activePlaybackToken == token else { return }
             activeBackend = .musicApp
-            scheduleMusicCompletion(for: url)
+            scheduleMusicCompletion(for: url, token: token)
             transition(to: .playing(file: track.originalFilename))
             Log.playback.info("Playing \(track.originalFilename, privacy: .public) through Music AirPlay devices")
             return
@@ -98,7 +122,7 @@ actor PlaybackEngine {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            Task { await self?.handlePlaybackFinished() }
+            Task { await self?.handlePlaybackFinished(token: token) }
         }
 
         let errorObs = NotificationCenter.default.addObserver(
@@ -108,7 +132,7 @@ actor PlaybackEngine {
         ) { [weak self] notification in
             let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
             let message = error?.localizedDescription ?? "Unknown playback error"
-            Task { await self?.handlePlaybackError(message: message) }
+            Task { await self?.handlePlaybackError(message: message, token: token) }
         }
 
         playerItem = item
@@ -120,6 +144,7 @@ actor PlaybackEngine {
         activeBackend = .avPlayer
 
         transition(to: .playing(file: track.originalFilename))
+        startPlaybackStallWatchdog(token: token)
         Log.playback.info("Playing \(track.originalFilename, privacy: .public)")
     }
 
@@ -127,6 +152,12 @@ actor PlaybackEngine {
         await stopInternal()
         transition(to: .idle)
         return state
+    }
+
+    func resetPlaybackError() {
+        guard case .error = state else { return }
+        activePlaybackToken = nil
+        transition(to: .idle)
     }
 
     func pause() async -> PlaybackState {
@@ -146,6 +177,8 @@ actor PlaybackEngine {
             try? await musicController.resume()
         } else {
             player.play()
+            lastPlaybackProgressSeconds = currentPlaybackSeconds()
+            lastPlaybackProgressAt = Date()
         }
         transition(to: .playing(file: file))
         return state
@@ -154,6 +187,7 @@ actor PlaybackEngine {
     // MARK: - Private
 
     private func stopInternal(sendStopToActiveBackend: Bool = true) async {
+        activePlaybackToken = nil
         player.pause()
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
@@ -161,7 +195,9 @@ actor PlaybackEngine {
         if let errorObserver {
             NotificationCenter.default.removeObserver(errorObserver)
         }
+        player.replaceCurrentItem(with: nil)
         musicCompletionTask?.cancel()
+        playbackStallWatchdogTask?.cancel()
         if sendStopToActiveBackend, activeBackend == .musicApp {
             try? await musicController.stop()
         }
@@ -169,27 +205,82 @@ actor PlaybackEngine {
         endObserver = nil
         errorObserver = nil
         musicCompletionTask = nil
+        playbackStallWatchdogTask = nil
         activeBackend = .avPlayer
     }
 
-    private func handlePlaybackFinished() async {
-        guard state.isPlaying else { return }
+    func handlePlaybackFinished(token: UUID) async {
+        guard activePlaybackToken == token, state.isPlaying else { return }
         await stopInternal(sendStopToActiveBackend: false)
         transition(to: .idle)
         Log.playback.info("Track finished")
 
-        if let cb = trackFinishedCallback {
-            Task { await cb() }
+        notifyTrackFinished(token: token)
+    }
+
+    private func handlePlaybackError(message: String, token: UUID) async {
+        guard activePlaybackToken == token, state.isPlaying else { return }
+        Log.playback.error("Playback error: \(message, privacy: .public)")
+        await stopInternal(sendStopToActiveBackend: false)
+        transition(to: .idle)
+        notifyTrackFinished(token: token)
+    }
+
+    private func startPlaybackStallWatchdog(token: UUID) {
+        playbackStallWatchdogTask?.cancel()
+        lastPlaybackProgressSeconds = currentPlaybackSeconds()
+        lastPlaybackProgressAt = Date()
+
+        let interval = max(stalledPlaybackCheckInterval, 0.01)
+        let intervalNanoseconds = UInt64(interval * 1_000_000_000)
+        playbackStallWatchdogTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalNanoseconds)
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                await self.checkForStalledPlayback(token: token)
+            }
         }
     }
 
-    private func handlePlaybackError(message: String) async {
-        Log.playback.error("Playback error: \(message, privacy: .public)")
-        await stopInternal()
-        transition(to: .error(message: message))
+    private func checkForStalledPlayback(token: UUID) async {
+        guard activePlaybackToken == token,
+              state.isPlaying,
+              activeBackend == .avPlayer,
+              playerItem != nil else { return }
+
+        let now = Date()
+        let currentSeconds = currentPlaybackSeconds()
+        if currentSeconds > lastPlaybackProgressSeconds + 0.05 {
+            lastPlaybackProgressSeconds = currentSeconds
+            lastPlaybackProgressAt = now
+            return
+        }
+
+        guard now.timeIntervalSince(lastPlaybackProgressAt) >= stalledPlaybackTimeout else { return }
+        await handlePlaybackStalled(token: token)
     }
 
-    private func scheduleMusicCompletion(for url: URL) {
+    private func currentPlaybackSeconds() -> TimeInterval {
+        let seconds = playbackTimeProvider(player)
+        return seconds.isFinite ? seconds : 0
+    }
+
+    private func handlePlaybackStalled(token: UUID) async {
+        guard activePlaybackToken == token, state.isPlaying else { return }
+        Log.playback.error("Playback stalled for \(self.stalledPlaybackTimeout, privacy: .public) seconds; skipping current track")
+        await stopInternal(sendStopToActiveBackend: false)
+        transition(to: .idle)
+        notifyTrackFinished(token: token)
+    }
+
+    private func notifyTrackFinished(token: UUID) {
+        if let cb = trackFinishedCallback {
+            Task { await cb(token) }
+        }
+    }
+
+    private func scheduleMusicCompletion(for url: URL, token: UUID) {
         musicCompletionTask?.cancel()
         musicCompletionTask = Task { [weak self] in
             let asset = AVURLAsset(url: url)
@@ -199,7 +290,7 @@ actor PlaybackEngine {
             let delay = UInt64((seconds + 1.0) * 1_000_000_000)
             try? await Task.sleep(nanoseconds: delay)
             guard !Task.isCancelled else { return }
-            await self?.handlePlaybackFinished()
+            await self?.handlePlaybackFinished(token: token)
         }
     }
 
