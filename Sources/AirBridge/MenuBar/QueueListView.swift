@@ -10,8 +10,9 @@ struct QueueListView: View {
                 .font(.caption)
         } else {
             ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(queueState.tracks.enumerated()), id: \.element.id) { idx, track in
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(queueState.tracks.indices, id: \.self) { idx in
+                        let track = queueState.tracks[idx]
                         HStack(spacing: 6) {
                             Text("\(idx + 1).")
                                 .font(.caption2)

@@ -6,6 +6,8 @@ import os
 
 @MainActor
 final class AppState: ObservableObject {
+    typealias OutputDeviceProvider = @MainActor (String?) -> [AudioOutputDeviceInfo]
+
     @Published var playbackState: PlaybackState = .idle
     @Published var queueState: QueueState = QueueState()
     @Published var outputDevices: [AudioOutputDeviceInfo] = []
@@ -24,10 +26,27 @@ final class AppState: ObservableObject {
     let queue: PlaybackQueue
     let advertiser = ServiceAdvertiser()
     private let musicController: MusicAppBridge
-    private var serverTask: Task<Void, Never>?
+    private struct ServerRun {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+    private struct ServerRestartRun {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+
+    private var serverRun: ServerRun?
+    private var serverRestartRun: ServerRestartRun?
+    private var periodicStateSyncTask: Task<Void, Never>?
+    private let outputDeviceProvider: OutputDeviceProvider
     private static let musicAirPlayDeviceIDsKey = "musicAirPlayDeviceIDs"
 
-    init() {
+    init(
+        startBackgroundWork: Bool = true,
+        outputDeviceProvider: @escaping OutputDeviceProvider = {
+            AudioDeviceManager.allOutputDevices(engineTargetUID: $0)
+        }
+    ) {
         self.listenAddress = UserDefaults.standard.string(forKey: "listenAddress") ?? "127.0.0.1"
         let portStr = UserDefaults.standard.string(forKey: "serverPort") ?? "9876"
         self.serverPort = Int(portStr) ?? 9876
@@ -37,10 +56,13 @@ final class AppState: ObservableObject {
         let player = AVPlayer()
         let musicController = MusicAppBridge()
         self.musicController = musicController
+        self.outputDeviceProvider = outputDeviceProvider
         self.routePickerPlayer = player
         let engine = PlaybackEngine(player: player, musicController: musicController)
         self.engine = engine
         self.queue = PlaybackQueue(engine: engine)
+
+        guard startBackgroundWork else { return }
 
         Task {
             await engine.setMusicAirPlayDeviceIDs(selectedMusicAirPlayDeviceIDs)
@@ -82,21 +104,15 @@ final class AppState: ObservableObject {
             await refreshMusicAirPlayDevices()
         }
 
-        // Periodic state sync. This also reflects system AirPlay picker changes
-        // that alter the current macOS default output route.
-        Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(500))
-                let q = await queue.list()
-                let engineUID = await engine.outputDeviceUID
-                await MainActor.run {
-                    self.queueState = q
-                    self.refreshOutputDevices(engineTargetUID: engineUID)
-                }
-            }
-        }
+        startPeriodicStateSync()
 
         startServer()
+    }
+
+    deinit {
+        periodicStateSyncTask?.cancel()
+        serverRestartRun?.task.cancel()
+        serverRun?.task.cancel()
     }
 
     func setOutputDevice(uid: String?) async throws -> Bool {
@@ -171,21 +187,55 @@ final class AppState: ObservableObject {
 
     func refreshOutputDevices(engineTargetUID: String? = nil) {
         let targetUID = engineTargetUID ?? UserDefaults.standard.string(forKey: "engineOutputDeviceUID")
-        let devices = AudioDeviceManager.allOutputDevices(engineTargetUID: targetUID)
-        outputDevices = devices
+        let devices = outputDeviceProvider(targetUID)
+        let outputName: String
 
         if !selectedMusicAirPlayDeviceIDs.isEmpty {
             let names = musicAirPlayDevices
                 .filter { selectedMusicAirPlayDeviceIDs.contains($0.id) }
                 .map(\.name)
-            currentOutputName = names.isEmpty ? "Music AirPlay" : names.joined(separator: ", ")
+            outputName = names.isEmpty ? "Music AirPlay" : names.joined(separator: ", ")
         } else if let targetUID, let target = devices.first(where: { $0.id == targetUID }) {
-            currentOutputName = target.name
+            outputName = target.name
         } else if let currentDefault = devices.first(where: { $0.isSystemDefault }) {
-            currentOutputName = "\(currentDefault.name) (System Default)"
+            outputName = "\(currentDefault.name) (System Default)"
         } else {
-            currentOutputName = "System Default"
+            outputName = "System Default"
         }
+
+        if outputDevices != devices {
+            outputDevices = devices
+        }
+        if currentOutputName != outputName {
+            currentOutputName = outputName
+        }
+    }
+
+    func startPeriodicStateSync() {
+        guard periodicStateSyncTask == nil else { return }
+
+        periodicStateSyncTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .milliseconds(500))
+                } catch {
+                    return
+                }
+
+                guard !Task.isCancelled, let self else { return }
+                await self.syncStateOnce()
+            }
+        }
+    }
+
+    func syncStateOnce() async {
+        let newQueueState = await queue.list()
+        let engineUID = await engine.outputDeviceUID
+
+        if queueState != newQueueState {
+            queueState = newQueueState
+        }
+        refreshOutputDevices(engineTargetUID: engineUID)
     }
 
     private func syncMusicAirPlayDeviceSelection() {
@@ -211,16 +261,17 @@ final class AppState: ObservableObject {
 
 extension AppState {
     func startServer() {
-        guard serverTask == nil else { return }
+        guard serverRun == nil else { return }
         let engine = self.engine
         let queue = self.queue
         let address = self.listenAddress
         let port = self.serverPort
         let authToken = self.authToken
+        let runID = UUID()
 
         self.serverRunning = true
-        Task { advertiser.start(port: UInt16(port)) }
-        self.serverTask = Task.detached { [weak self] in
+        advertiser.start(port: UInt16(port))
+        let task = Task.detached { [weak self] in
             do {
                 let app = try buildApplication(
                     engine: engine,
@@ -237,24 +288,51 @@ extension AppState {
             } catch {
                 Log.server.error("Server failed: \(error)")
             }
-            guard let strongSelf = self else { return }
-            await MainActor.run {
-                strongSelf.serverRunning = false
-            }
+            await self?.serverDidExit(runID: runID)
         }
+        self.serverRun = ServerRun(id: runID, task: task)
     }
 
     func stopServer() async {
         advertiser.stop()
-        guard let task = serverTask else { return }
+        guard let run = serverRun else {
+            serverRunning = false
+            return
+        }
         Log.server.info("Stopping server")
-        task.cancel()
-        _ = await task.value
-        serverTask = nil
-        serverRunning = false
+        run.task.cancel()
+        _ = await run.task.value
+        if serverRun?.id == run.id {
+            serverRun = nil
+            serverRunning = false
+        }
     }
 
-    func restartServer() async {
+    @discardableResult
+    func restartServer() async -> UUID {
+        if let activeRestart = serverRestartRun {
+            await activeRestart.task.value
+            if serverRestartRun?.id == activeRestart.id {
+                serverRestartRun = nil
+            }
+            return activeRestart.id
+        }
+
+        let restartID = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performServerRestart()
+        }
+        serverRestartRun = ServerRestartRun(id: restartID, task: task)
+
+        await task.value
+        if serverRestartRun?.id == restartID {
+            serverRestartRun = nil
+        }
+        return restartID
+    }
+
+    private func performServerRestart() async {
         await stopServer()
 
         self.listenAddress = UserDefaults.standard.string(forKey: "listenAddress") ?? "127.0.0.1"
@@ -263,5 +341,12 @@ extension AppState {
         self.authToken = UserDefaults.standard.string(forKey: "authToken") ?? ""
 
         startServer()
+    }
+
+    private func serverDidExit(runID: UUID) {
+        guard serverRun?.id == runID else { return }
+        serverRun = nil
+        serverRunning = false
+        advertiser.stop()
     }
 }
